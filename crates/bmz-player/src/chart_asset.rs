@@ -162,7 +162,7 @@ fn archive_asset_entry(
         if exists(&name) {
             return Ok(Some(name));
         }
-        let (parent, file) = name.rsplit_once('/').map_or(("", name.as_str()), |split| split);
+        let (parent, file) = name.rsplit_once('/').unwrap_or(("", name.as_str()));
         if let Some(stem) = Path::new(file).file_stem().and_then(|stem| stem.to_str()) {
             let extensions =
                 if preview { PREVIEW_AUDIO_EXTENSIONS } else { CHART_IMAGE_EXTENSIONS };
