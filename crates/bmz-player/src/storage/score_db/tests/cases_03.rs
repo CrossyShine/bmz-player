@@ -1,6 +1,81 @@
 use super::*;
 
 #[test]
+fn history_ir_identity_survives_reopen_and_branches_after_profile_copy() {
+    let temp_root =
+        std::env::temp_dir().join(crate::ir::payload::new_score_idempotency_key().unwrap());
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let original_path = temp_root.join("original.db");
+    let separate_path = temp_root.join("separate.db");
+    let fork_a_path = temp_root.join("fork-a.db");
+    let fork_b_path = temp_root.join("fork-b.db");
+
+    crate::storage::migration::migrate_score_db(&original_path).unwrap();
+    let mut original = ScoreDatabase::open(&original_path).unwrap();
+    let first_id = original.insert_score(&record(40, ClearType::Hard)).unwrap();
+    let first_key = original.ir_submission_idempotency_key_for_history(first_id).unwrap();
+    let parsed = uuid::Uuid::parse_str(first_key.strip_prefix("bmz-score-v2-").unwrap()).unwrap();
+    assert_eq!(parsed.get_version_num(), 4);
+    assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
+    drop(original);
+
+    let reopened = ScoreDatabase::open(&original_path).unwrap();
+    assert_eq!(reopened.ir_submission_idempotency_key_for_history(first_id).unwrap(), first_key);
+    drop(reopened);
+
+    std::fs::copy(&original_path, &fork_a_path).unwrap();
+    std::fs::copy(&original_path, &fork_b_path).unwrap();
+
+    crate::storage::migration::migrate_score_db(&separate_path).unwrap();
+    let mut separate = ScoreDatabase::open(&separate_path).unwrap();
+    let separate_first_id = separate.insert_score(&record(40, ClearType::Hard)).unwrap();
+    assert_eq!(separate_first_id, first_id);
+    let separate_key =
+        separate.ir_submission_idempotency_key_for_history(separate_first_id).unwrap();
+    assert_ne!(separate_key, first_key);
+    drop(separate);
+
+    let mut fork_a = ScoreDatabase::open(&fork_a_path).unwrap();
+    let mut fork_b = ScoreDatabase::open(&fork_b_path).unwrap();
+    let branch_a_id = fork_a.insert_score(&record(42, ClearType::Easy)).unwrap();
+    let branch_b_id = fork_b.insert_score(&record(42, ClearType::Easy)).unwrap();
+    assert_eq!(branch_a_id, branch_b_id);
+    let branch_a_key = fork_a.ir_submission_idempotency_key_for_history(branch_a_id).unwrap();
+    let branch_b_key = fork_b.ir_submission_idempotency_key_for_history(branch_b_id).unwrap();
+    assert_ne!(branch_a_key, branch_b_key);
+    drop(fork_a);
+    drop(fork_b);
+
+    std::fs::remove_dir_all(temp_root).unwrap();
+}
+
+#[test]
+fn score_migration_assigns_idempotency_keys_to_existing_histories() {
+    let temp_root =
+        std::env::temp_dir().join(crate::ir::payload::new_score_idempotency_key().unwrap());
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let path = temp_root.join("legacy.db");
+
+    crate::storage::migration::migrate_score_db(&path).unwrap();
+    let mut db = ScoreDatabase::open(&path).unwrap();
+    let history_id = db.insert_score(&record(40, ClearType::Hard)).unwrap();
+    drop(db);
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE score_history_ir_identity; PRAGMA user_version = 31;").unwrap();
+    drop(conn);
+    crate::storage::migration::migrate_score_db(&path).unwrap();
+
+    let db = ScoreDatabase::open(&path).unwrap();
+    let key = db.ir_submission_idempotency_key_for_history(history_id).unwrap();
+    let parsed = uuid::Uuid::parse_str(key.strip_prefix("bmz-score-v2-").unwrap()).unwrap();
+    assert_eq!(parsed.get_version_num(), 4);
+    assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
+    drop(db);
+    std::fs::remove_dir_all(temp_root).unwrap();
+}
+
+#[test]
 fn select_score_lookups_batch_more_keys_than_one_sqlite_variable_chunk() {
     let mut conn = Connection::open_in_memory().unwrap();
     configure_connection(&conn).unwrap();

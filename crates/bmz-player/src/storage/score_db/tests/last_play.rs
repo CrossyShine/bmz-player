@@ -103,10 +103,17 @@ fn last_play_migration_recovers_history_and_clear_only_first_date() {
     let mut db = ScoreDatabase { conn };
     let mut regular = record(20, ClearType::Normal);
     regular.played_at = 100;
-    db.insert_score(&regular).unwrap();
+    // Seed this pre-v31 database through its old write boundary. The current
+    // insert_score path also writes the v32 IR identity table, which does not
+    // exist in this migration fixture yet.
+    insert_score_history(db.conn(), &regular, None).unwrap();
+    let first_history_id = db.conn.last_insert_rowid();
+    upsert_score_best(db.conn(), &regular, first_history_id).unwrap();
     regular.played_at = 200;
     regular.score = score_with_ex_score(2);
-    db.insert_score(&regular).unwrap();
+    insert_score_history(db.conn(), &regular, None).unwrap();
+    let second_history_id = db.conn.last_insert_rowid();
+    upsert_score_best(db.conn(), &regular, second_history_id).unwrap();
     let mut assist = record(0, ClearType::AssistEasy);
     assist.chart_sha256 = [8; 32];
     assist.played_at = 150;

@@ -156,8 +156,23 @@ pub fn enqueue_local_score_jobs(
             break;
         }
 
-        let payload = build_local_score_submission(&row, &chart, analysis.as_ref(), replay_hash);
-        let payload_json = serde_json::to_string(&payload)?;
+        let preserved_payload = if options.resend {
+            existing_score_job_payload(network_db, &target, row.id)?
+        } else {
+            None
+        };
+        let payload_json = if let Some(payload_json) = preserved_payload {
+            payload_json
+        } else {
+            let mut payload =
+                build_local_score_submission(&row, &chart, analysis.as_ref(), replay_hash);
+            if options.resend
+                && let Some(existing_key) = successful_submission_key(network_db, &target, row.id)?
+            {
+                payload.idempotency_key = existing_key;
+            }
+            serde_json::to_string(&payload)?
+        };
         network_db.enqueue_ir_score_job(&NewIrScoreJob {
             provider: target.provider_key.clone(),
             account_id: target.account_id.clone(),
@@ -200,6 +215,40 @@ fn has_score_from_target_ir_source(
         |row| row.get(0),
     )?;
     Ok(exists)
+}
+
+fn existing_score_job_payload(
+    network_db: &NetworkDatabase,
+    target: &TargetProvider,
+    local_score_id: i64,
+) -> Result<Option<String>> {
+    Ok(network_db
+        .ir_score_jobs_for_local_score(IrJobKind::Score, local_score_id)?
+        .into_iter()
+        .find(|job| {
+            job.provider == target.provider_key
+                && job.account_id == target.account_id
+                && !job.payload_json.is_empty()
+        })
+        .map(|job| job.payload_json))
+}
+
+fn successful_submission_key(
+    network_db: &NetworkDatabase,
+    target: &TargetProvider,
+    local_score_id: i64,
+) -> Result<Option<String>> {
+    let key: String = network_db.conn().query_row(
+        "SELECT COALESCE((
+            SELECT submission_key FROM ir_score_success_ledger
+            WHERE provider = ?1 AND account_id = ?2 AND kind = 'score'
+              AND local_score_id = ?3
+            ORDER BY submitted_at DESC, submission_key DESC LIMIT 1
+        ), '')",
+        rusqlite::params![target.provider_key, target.account_id, local_score_id],
+        |row| row.get(0),
+    )?;
+    Ok((!key.is_empty()).then_some(key))
 }
 
 #[derive(Debug, Clone)]
@@ -311,6 +360,7 @@ fn existing_score_state(
 #[derive(Debug, Clone)]
 struct BackfillScoreRow {
     id: i64,
+    idempotency_key: String,
     chart_sha256: [u8; 32],
     ln_policy: LnScorePolicy,
     double_option: DoubleOptionScoreBucket,
@@ -388,8 +438,11 @@ fn load_score_history_rows(score_db: &ScoreDatabase) -> Result<Vec<BackfillScore
             arrange_2p,
             applied_double_option,
             source_kind,
-            seed_scheme
+            seed_scheme,
+            score_history_ir_identity.idempotency_key
          FROM score_history
+         JOIN score_history_ir_identity
+           ON score_history_ir_identity.score_history_id = score_history.id
          ORDER BY played_at ASC, id ASC",
     )?;
     let rows = stmt.query_map([], score_history_row_from_row)?;
@@ -409,6 +462,7 @@ fn score_history_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Backf
     let seed_scheme: String = row.get(36)?;
     Ok(BackfillScoreRow {
         id: row.get(0)?,
+        idempotency_key: row.get(37)?,
         chart_sha256: hex_to_hash::<32>(&sha256_hex)?,
         ln_policy: LnScorePolicy::from_str_opt(&ln_policy).unwrap_or(LnScorePolicy::ForceLn),
         double_option: DoubleOptionScoreBucket::from_str_or_off(&double_option),
@@ -579,7 +633,7 @@ fn build_local_score_submission(
             upload_intent: "later".to_string(),
         }),
         evidence: Default::default(),
-        idempotency_key: format!("bmz-score-{}", row.id),
+        idempotency_key: row.idempotency_key.clone(),
     }
 }
 

@@ -134,6 +134,7 @@ fn rian_ir_local_backfill_target_is_disabled() {
 fn test_row() -> BackfillScoreRow {
     BackfillScoreRow {
         id: 42,
+        idempotency_key: "bmz-score-v2-test-history-key".to_string(),
         chart_sha256: [2; 32],
         ln_policy: LnScorePolicy::ForceCn,
         double_option: DoubleOptionScoreBucket::Battle,
@@ -242,7 +243,7 @@ fn local_backfill_payload_marks_submission_source_and_omits_evidence() {
 
     assert!(is_local_backfill_submission(&payload));
     assert!(payload.evidence.is_empty());
-    assert_eq!(payload.idempotency_key, "bmz-score-42");
+    assert_eq!(payload.idempotency_key, "bmz-score-v2-test-history-key");
     assert_eq!(payload.play_options["submission_source"], LOCAL_BACKFILL_SOURCE);
     assert_eq!(payload.play_options["local_score_history_id"], 42);
 }
@@ -408,24 +409,64 @@ fn downloaded_scores_are_skipped_only_for_their_source_account_even_with_resend(
         providers: vec![bmz, other],
         ..IrConfig::default()
     };
+    let local_score_id: i64 =
+        score_db.conn().query_row("SELECT id FROM score_history", [], |row| row.get(0)).unwrap();
 
     let same_account = IrLocalUploadOptions {
         provider: Some("bmz".to_string()),
         dry_run: true,
         ..IrLocalUploadOptions::default()
     };
+    let key_before_dry_run =
+        score_db.ir_submission_idempotency_key_for_history(local_score_id).unwrap();
+    let mut dry_run_network = test_network_db();
     let dry_run = enqueue_local_score_jobs(
         std::path::Path::new("."),
         &ir_config,
         &score_db,
         &library_db,
-        &mut test_network_db(),
+        &mut dry_run_network,
         &same_account,
         1_800_000_001,
     )
     .unwrap();
     assert_eq!(dry_run.candidates, 0);
     assert_eq!(dry_run.skipped_already_submitted, 1);
+    assert_eq!(
+        score_db.ir_submission_idempotency_key_for_history(local_score_id).unwrap(),
+        key_before_dry_run
+    );
+    assert_eq!(dry_run_network.ir_score_job_status_counts(None, None).unwrap().pending, 0);
+
+    // A different account remains eligible, and dry-run must not create or alter identity state.
+    let mut account_b_dry_run =
+        IrConfig { providers: ir_config.providers.clone(), ..ir_config.clone() };
+    account_b_dry_run.providers[0].account_id = "account-b".to_string();
+    let mut candidate_dry_run_network = test_network_db();
+    let candidate_dry_run = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &account_b_dry_run,
+        &score_db,
+        &library_db,
+        &mut candidate_dry_run_network,
+        &IrLocalUploadOptions {
+            provider: Some("bmz".to_string()),
+            dry_run: true,
+            ..Default::default()
+        },
+        1_800_000_002,
+    )
+    .unwrap();
+    assert_eq!(candidate_dry_run.candidates, 1);
+    assert_eq!(candidate_dry_run.enqueued, 0);
+    assert_eq!(
+        candidate_dry_run_network.ir_score_job_status_counts(None, None).unwrap().pending,
+        0
+    );
+    assert_eq!(
+        score_db.ir_submission_idempotency_key_for_history(local_score_id).unwrap(),
+        key_before_dry_run
+    );
 
     let resend = IrLocalUploadOptions { dry_run: false, resend: true, ..same_account.clone() };
     let mut network_db = test_network_db();
@@ -467,4 +508,91 @@ fn downloaded_scores_are_skipped_only_for_their_source_account_even_with_resend(
     )
     .unwrap();
     assert_eq!(other_provider.enqueued, 1);
+    let persistent_key =
+        score_db.ir_submission_idempotency_key_for_history(local_score_id).unwrap();
+    let other_provider_job = network_db
+        .pending_ir_score_jobs_ignoring_backoff(1_800_000_004, 10)
+        .unwrap()
+        .into_iter()
+        .find(|job| job.provider == "other")
+        .unwrap();
+    let payload: crate::ir::types::IrScoreSubmission =
+        serde_json::from_str(&other_provider_job.payload_json).unwrap();
+    assert_eq!(payload.idempotency_key, persistent_key);
+}
+
+#[test]
+fn backfill_resend_preserves_an_existing_legacy_queued_payload() {
+    let mut network_db = test_network_db();
+    let target = TargetProvider {
+        provider_key: "bmz-official".to_string(),
+        account_id: "account-1".to_string(),
+    };
+    let payload = serde_json::json!({
+        "idempotency_key": "bmz-score-42",
+        "legacy_payload_marker": "keep-exactly",
+    })
+    .to_string();
+    network_db
+        .enqueue_ir_score_job(&NewIrScoreJob {
+            provider: target.provider_key.clone(),
+            account_id: target.account_id.clone(),
+            kind: IrJobKind::Score,
+            local_score_id: 42,
+            chart_sha256: [2; 32],
+            ln_policy: LnScorePolicy::ForceCn,
+            payload_json: payload.clone(),
+            now: 100,
+        })
+        .unwrap();
+
+    assert_eq!(
+        existing_score_job_payload(&network_db, &target, 42).unwrap().as_deref(),
+        Some(payload.as_str())
+    );
+}
+
+#[test]
+fn backfill_resend_reuses_a_successful_legacy_submission_key() {
+    let mut network_db = test_network_db();
+    let target = TargetProvider {
+        provider_key: "bmz-official".to_string(),
+        account_id: "account-1".to_string(),
+    };
+    let legacy_key = "bmz-score-42";
+    let job_id = network_db
+        .enqueue_ir_score_job(&NewIrScoreJob {
+            provider: target.provider_key.clone(),
+            account_id: target.account_id.clone(),
+            kind: IrJobKind::Score,
+            local_score_id: 42,
+            chart_sha256: [2; 32],
+            ln_policy: LnScorePolicy::ForceCn,
+            payload_json: serde_json::json!({ "idempotency_key": legacy_key }).to_string(),
+            now: 100,
+        })
+        .unwrap();
+    network_db
+        .complete_ir_score_job(
+            &NewIrScoreSubmission {
+                job_id,
+                provider: target.provider_key.clone(),
+                account_id: target.account_id.clone(),
+                kind: IrJobKind::Score,
+                local_score_id: 42,
+                remote_score_id: "remote-42".to_string(),
+                status: "succeeded".to_string(),
+                submitted_at: 101,
+                log_path: String::new(),
+                error: String::new(),
+            },
+            None,
+            r#"{"score_id":"remote-42"}"#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        successful_submission_key(&network_db, &target, 42).unwrap().as_deref(),
+        Some(legacy_key)
+    );
 }

@@ -841,6 +841,11 @@ retryごとに変わり得るevidenceやclient version、譜面の表示用metad
 新しいプレイの送信keyは `bmz-score-v2-<UUID v4>` をenqueue前に一度だけ生成し、
 payloadに保存する。HTTP retryでは保存済みkeyを再利用する。ローカルscore IDは
 keyの一意性には使わない。既存スコアの再送や既存jobの再enqueueは行わない。
+local backfillのkeyも `score_history` ごとの永続UUIDを使う。score DB migrationで既存履歴へ
+keyを割り当て、新規履歴は保存transaction内で生成する。同じ履歴を再実行・DB再openしても
+keyは変わらず、別profileで同じhistory IDになってもkeyは衝突しない。profile DBを複製した
+後で各profileに別々の履歴を追加した場合も、それぞれ新しいkeyを生成する。dry-runはkeyを
+割り当てず、既存queueの再送では保存済みpayloadとkeyをそのまま使う。
 
 ### Response: ランキングあり
 

@@ -592,7 +592,7 @@ mod tests {
         run_migrations(&mut conn, SCORE_MIGRATIONS).unwrap();
 
         let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, SCORE_MIGRATIONS.last().unwrap().version);
 
         let mut stmt = conn.prepare("PRAGMA table_info(score_best)").unwrap();
         let columns = stmt
@@ -656,7 +656,7 @@ mod tests {
         run_migrations(&mut conn, SCORE_MIGRATIONS).unwrap();
 
         let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, SCORE_MIGRATIONS.last().unwrap().version);
         let course_policy: String =
             conn.query_row("SELECT ln_policy FROM course_scores", [], |row| row.get(0)).unwrap();
         let slot_policy: String = conn
@@ -707,7 +707,7 @@ mod tests {
         run_score_migrations(&mut conn).unwrap();
 
         let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, SCORE_MIGRATIONS.last().unwrap().version);
         assert!(column_exists(&conn, "score_history", "source_kind").unwrap());
         assert!(column_exists(&conn, "score_history", "arrange_2p").unwrap());
         assert!(column_exists(&conn, "score_history", "applied_double_option").unwrap());

@@ -1211,4 +1211,29 @@ pub const SCORE_MIGRATIONS: &[Migration] = &[
              WHERE autoplay = 0;",
         ],
     },
+    Migration {
+        version: 32,
+        // Give each persisted history a stable random identity for provider idempotency.
+        statements: &[
+            "CREATE TABLE score_history_ir_identity (
+                score_history_id INTEGER PRIMARY KEY
+                    REFERENCES score_history(id) ON DELETE CASCADE,
+                idempotency_key TEXT NOT NULL UNIQUE
+            );",
+            "WITH random_ids AS (
+                SELECT id, lower(hex(randomblob(16))) AS value
+                FROM score_history
+             )
+             INSERT INTO score_history_ir_identity (score_history_id, idempotency_key)
+             SELECT id,
+                    'bmz-score-v2-' ||
+                    substr(value, 1, 8) || '-' ||
+                    substr(value, 9, 4) || '-' ||
+                    '4' || substr(value, 14, 3) || '-' ||
+                    substr('89ab', 1 + ((instr('0123456789abcdef', substr(value, 17, 1)) - 1) % 4), 1) ||
+                    substr(value, 18, 3) || '-' ||
+                    substr(value, 21, 12)
+             FROM random_ids;",
+        ],
+    },
 ];

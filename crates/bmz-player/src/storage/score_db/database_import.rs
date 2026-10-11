@@ -1,6 +1,20 @@
 use super::*;
 
 impl ScoreDatabase {
+    pub fn ir_submission_idempotency_key_for_history(
+        &self,
+        score_history_id: i64,
+    ) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT idempotency_key FROM score_history_ir_identity
+                 WHERE score_history_id = ?1",
+                params![score_history_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn open_read_only(path: &Path) -> Result<Self> {
         Ok(Self {
             conn: Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?,
@@ -46,6 +60,7 @@ impl ScoreDatabase {
         )?;
         insert_score_history(&tx, record, previous_best.as_ref())?;
         let history_id = tx.last_insert_rowid();
+        insert_score_history_ir_identity(&tx, history_id)?;
         if mode == ScoreInsertMode::Full {
             upsert_score_best(&tx, record, history_id)?;
             update_player_stats(&tx, record)?;
@@ -281,6 +296,7 @@ impl ScoreDatabase {
         )?;
         insert_score_history(&tx, record, previous_best.as_ref())?;
         let history_id = tx.last_insert_rowid();
+        insert_score_history_ir_identity(&tx, history_id)?;
         upsert_score_best(&tx, record, history_id)?;
         update_player_stats(&tx, record)?;
         insert_score_history_source(&tx, history_id, source, false)?;

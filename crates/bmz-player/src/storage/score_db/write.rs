@@ -176,6 +176,19 @@ pub(super) fn insert_score_history(
     Ok(())
 }
 
+pub(super) fn insert_score_history_ir_identity(
+    conn: &Connection,
+    score_history_id: i64,
+) -> Result<()> {
+    let idempotency_key = crate::ir::payload::new_score_idempotency_key()?;
+    conn.execute(
+        "INSERT INTO score_history_ir_identity (score_history_id, idempotency_key)
+         VALUES (?1, ?2)",
+        params![score_history_id, idempotency_key],
+    )?;
+    Ok(())
+}
+
 pub(super) fn score_history_id_for_source(
     conn: &Connection,
     key: &ScoreHistorySourceKey,
