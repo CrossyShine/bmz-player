@@ -161,6 +161,8 @@ impl WinitApp {
             && self.select.settings_edit.is_none()
             && self.select.key_config_edit.is_none()
             && self.jobs.pending_replay_import.is_none()
+            // 手動IR操作は旧profileのDB・認証情報を使う。実行中は切り替えない。
+            && !self.jobs.ir_manual.is_busy()
             && self.jobs.updates.pending_handoff.is_none()
             && !self.ui.egui.as_ref().is_some_and(EguiLayer::profile_operations_busy)
     }
@@ -168,8 +170,11 @@ impl WinitApp {
     pub(super) fn restart_profile_ir_sync(&mut self) {
         self.jobs.ir_sync = None;
         if !self.viewer_mode && tokio::runtime::Handle::try_current().is_ok() {
-            self.jobs.ir_sync =
-                spawn_ir_sync_worker(&self.boot, self.jobs.maintenance_select_tx.subscribe());
+            self.jobs.ir_sync = spawn_ir_sync_worker(
+                &self.boot,
+                self.jobs.maintenance_select_tx.subscribe(),
+                self.jobs.ir_manual.pause_receiver(),
+            );
         }
     }
 
@@ -378,6 +383,7 @@ impl WinitApp {
             self.skin.default_skin_manifest.as_ref(),
         )?;
         self.boot.activate_prepared_profile(prepared.profile)?;
+        self.jobs.ir_manual.reset_for_profile();
         // ここから先は失敗しないruntimeの入れ替え。非同期結果はreceiverごと破棄する。
         self.clear_profile_input();
         self.stop_select_preview();
@@ -539,7 +545,8 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let (_select_tx, select_rx) = tokio::sync::watch::channel(false);
-            let worker = spawn_ir_sync_worker(&boot, select_rx).unwrap();
+            let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+            let worker = spawn_ir_sync_worker(&boot, select_rx, pause_rx).unwrap();
             worker.stop();
             tokio::time::timeout(Duration::from_secs(2), async {
                 while !worker.task.is_finished() {
@@ -548,6 +555,59 @@ mod tests {
             })
             .await
             .unwrap();
+        });
+    }
+
+    #[test]
+    fn manual_ir_operation_pauses_the_resident_worker_until_it_finishes() {
+        use crate::storage::network_db::{IrJobKind, NetworkDatabase, NewIrScoreJob};
+
+        let data = ProfileTestDir::new();
+        let mut boot = data.boot();
+        let provider = &mut boot.profile_config.ir.providers[0];
+        provider.enabled = true;
+        provider.base_url = "http://127.0.0.1:1".into();
+        crate::storage::migration::migrate_network_db(&boot.profile_paths.network_db).unwrap();
+        crate::storage::migration::migrate_score_db(&boot.profile_paths.score_db).unwrap();
+        let network_db_path = boot.profile_paths.network_db.clone();
+        let job_status = || {
+            let db = NetworkDatabase::open(&network_db_path).unwrap();
+            db.ir_score_job_status_counts(None, None).unwrap()
+        };
+        {
+            // 未設定providerのjob。workerが取れば通信せず failed になる。
+            let mut db = NetworkDatabase::open(&network_db_path).unwrap();
+            db.enqueue_ir_score_job(&NewIrScoreJob {
+                provider: "unconfigured".into(),
+                account_id: "account".into(),
+                kind: IrJobKind::Score,
+                local_score_id: 1,
+                chart_sha256: [1; 32],
+                ln_policy: crate::ln_policy::LnScorePolicy::ForceLn,
+                payload_json: "{}".into(),
+                now: 1,
+            })
+            .unwrap();
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (_select_tx, select_rx) = tokio::sync::watch::channel(true);
+            let (pause_tx, pause_rx) = tokio::sync::watch::channel(true);
+            let worker = spawn_ir_sync_worker(&boot, select_rx, pause_rx).unwrap();
+            // 一時停止中は送信しない。
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert_eq!(job_status().pending, 1);
+            // 解除すると再開して、同じjobを処理する。
+            pause_tx.send_replace(false);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while job_status().pending != 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(job_status().failed, 1);
+            worker.stop();
         });
     }
 }

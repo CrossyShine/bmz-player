@@ -412,6 +412,7 @@ enum AppUserEvent {
     CourseLinkRepair,
     TableFetch,
     RivalSync,
+    IrManual,
     ViewerCommand(crate::viewer_ipc::ViewerCommand),
 }
 
@@ -620,6 +621,7 @@ impl Drop for IrSyncWorker {
 fn spawn_ir_sync_worker(
     boot: &bootstrap::BootstrappedApp,
     mut select_rx: tokio::sync::watch::Receiver<bool>,
+    mut pause_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Option<IrSyncWorker> {
     if crate::cli::latency_validation_enabled() {
         return None;
@@ -646,6 +648,17 @@ fn spawn_ir_sync_worker(
                     _ = stop_rx.changed() => return,
                     changed = select_rx.changed() => {
                         if changed.is_err() { return; }
+                    }
+                }
+            }
+            // 設定画面からの手動IR操作が動いている間は送らない（二重claimは無いが、
+            // 手動操作の進捗・送信間隔を常駐workerの送信と混ぜないため）。
+            // 送信側が破棄された場合は一時停止なしとして続行する。
+            while *pause_rx.borrow() {
+                tokio::select! {
+                    _ = stop_rx.changed() => return,
+                    changed = pause_rx.changed() => {
+                        if changed.is_err() { break; }
                     }
                 }
             }
@@ -678,7 +691,7 @@ fn spawn_ir_sync_worker(
                     let mut submitted = 0_u32;
                     let mut failed = 0_u32;
                     for index in 0..crate::ir::sync::IR_SYNC_BATCH_LIMIT {
-                        if *stop_rx.borrow() || !*select_rx.borrow() {
+                        if *stop_rx.borrow() || !*select_rx.borrow() || *pause_rx.borrow() {
                             break;
                         }
                         let job_now = std::time::SystemTime::now()

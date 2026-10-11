@@ -243,6 +243,8 @@ pub(super) struct ResultIrScrollRuntime {
 pub(super) struct AppJobs {
     pub(super) profile_change: Option<profile_switch::PendingProfileChange>,
     pub(super) ir_sync: Option<IrSyncWorker>,
+    /// 設定画面から起動する手動IR操作（一括送信・取得・キュー再送）。
+    pub(super) ir_manual: crate::ir::manual_job::IrManualHandle,
     pub(super) pending_locale_refresh: bool,
     /// 通常表・rianIR表の取得channel、queue、progress、世代状態。
     pub(super) table_fetch: TableFetchRuntime,

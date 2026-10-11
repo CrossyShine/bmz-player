@@ -534,6 +534,10 @@ impl ApplicationHandler<AppUserEvent> for WinitApp {
                 self.poll_select_maintenance();
                 self.request_redraw();
             }
+            AppUserEvent::IrManual => {
+                self.poll_select_maintenance();
+                self.request_redraw();
+            }
             AppUserEvent::RivalSync => {
                 self.poll_select_maintenance();
                 self.request_redraw();
@@ -688,6 +692,8 @@ impl WinitApp {
         if let Some(handle) = self.integrations.discord_presence.take() {
             handle.shutdown();
         }
+        // 処理中の1件だけ待って止める。待ち切れなくてもjobはlease経由で再送される。
+        self.jobs.ir_manual.shutdown(std::time::Duration::from_secs(3));
         self.flush_pending_screenshots("app exit");
         self.save_configs_for_exit(self.active_hispeed(), "game exit");
         self.wait_for_pending_play_result_on_exit();

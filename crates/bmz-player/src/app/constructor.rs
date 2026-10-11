@@ -19,6 +19,15 @@ impl WinitApp {
         crate::cli::configure_latency_legacy_wayland_present(
             options.latency_legacy_wayland_present,
         );
+        let ir_manual_handle = crate::ir::manual_job::IrManualHandle::new();
+        {
+            let proxy = std::sync::Mutex::new(event_proxy.clone());
+            ir_manual_handle.set_wake(Arc::new(move || {
+                if let Ok(proxy) = proxy.lock() {
+                    let _ = proxy.send_event(AppUserEvent::IrManual);
+                }
+            }));
+        }
         let mut boot = boot;
         let viewer_mode = options.viewer_play;
         if let Some(cli_renderer) = options.renderer.clone() {
@@ -418,6 +427,7 @@ impl WinitApp {
             jobs: AppJobs {
                 profile_change: None,
                 ir_sync: None,
+                ir_manual: ir_manual_handle,
                 pending_locale_refresh: false,
                 table_fetch,
                 song_scan: SongScanRuntime::default(),
