@@ -340,7 +340,7 @@ python3 scripts/compare-latency.py .local/performance/linux-latency/pulse-256.lo
 ```
 
 HOSTはauto/pipewire/pulse/alsa、BUFFERはautoまたはframes、RATEはHz、SECONDSは3〜60。
-auto hostが従来通りPulseになることも確認する。無音probeにはmixer負荷・入力・描画がない。
+auto hostがPulseを選ぶことも確認する。無音probeにはmixer負荷・入力・描画がない。
 要求未ビルドやサーバー不在は非ゼロ終了とaudio_open_failureになる。設定を書き換えず、勝手に別hostへ出力しない。
 
 ゲームでの検証には**新しい専用ディレクトリ**を使う。下の変数をその端末の絶対パスへ設定し、
@@ -361,7 +361,7 @@ flatpak run --env=BMZ_DATA_DIR=/tmp/bmz-latency-new-run --env=BMZ_LATENCY_DIAGNO
   net.hyrorre.BMZPlayer --boot-play-sample --latency-stall-test
 ```
 
-`--latency-stall-test` は従来機能を再利用し、window threadだけを約2秒ごとに100ms停止する。
+`--latency-stall-test` は既存の停滞試験を再利用し、window threadだけを約2秒ごとに100ms停止する。
 スコア/リプレイ保存、IR送信/背景同期を抑止する。通常起動では無効。
 入力キュー以降へ注入する自動テストは、物理キーボードやUSBを含む測定ではない。
 

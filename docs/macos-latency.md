@@ -17,7 +17,7 @@ IOHIDは`bmz-player`の`macos-iohid` featureでのみコンパイルし、defaul
 
 IOHIDは専用スレッドのIOHIDManager / CFRunLoopからSharedInputBackendへ直接配送する。
 gameplayのwakerを起こし、ウィンドウ側のイベント消費や描画を待たない。
-メニューの操作は従来のwinitイベントを使う。AppKitのapplication/delegateを作り直さない。
+メニューの操作はwinitイベントを使う。AppKitのapplication/delegateを作り直さない。
 入力待ちはイベント駆動。50msの待機期限はフォーカス・権限状態の保守と終了確認用であり、
 キーを50msごとにpollするものではない。
 
@@ -156,7 +156,7 @@ cargo build -p bmz-player --release --locked
 
 設定のバックエンドで`Core Audio IOProc`を選び、Fixed 16等を設定する。
 `experimental-coreaudio-ioproc`はdefault featureに含まれるため、通常ビルドで選択できる。
-`Auto`と`Core Audio`は従来のCPAL / Audio Unit経路を維持し、IOProcは明示選択時だけ使う。
+`Auto`と`Core Audio`はCPAL / Audio Unit経路を使い、IOProcは明示選択時だけ使う。
 `--no-default-features`でIOProcを除外したビルドは候補を隠し、保存済みIOProc設定をAutoへ戻す。
 16が機器の最小値より小さければ対応範囲内へclampする。要求値・採用値・実callback framesを
 区別する。サンプルレートはHALのnominal rateへ適用し、非対応レートや変更が完了しない場合は
@@ -290,7 +290,7 @@ IOHIDの取得遅延測定ではない。
 
 gilrsのnext_event_blockingはmacOSで内部channelのrecv_timeoutを使うが、公開APIに
 設定変更・終了から待機解除する機構がない。scratch期限やroute変更を安全に統合する範囲を超えるため、
-macOSのgilrs取得ループは従来の1ms待機を維持する。GameControllerはイベント通知で取得し、
+macOSのgilrs取得ループは1ms待機で動作する。GameControllerはイベント通知で取得し、
 別途1ms周期のタイマーでスクラッチ停止などを処理する。
 Linuxのgilrsイベント待機は[Linux遅延検証](linux-latency.md#gilrsの待機と時計)を参照。
 

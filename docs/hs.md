@@ -15,8 +15,8 @@ Floating を組み合わせて扱う。HS-FIX はこれとは別に BPM 基準�
 | `NORMAL+FLOATING` | Normal | プレイ中に切替可能 |
 | `CLASSIC+FLOATING` | Classic | プレイ中に切替可能 |
 
-既定値は `CLASSIC+FLOATING`。旧 profile もこの設定として読み込むため、従来の
-直接倍率と Floating の動作を維持する。
+既定値は `CLASSIC+FLOATING`。HS設定を保存していない profile もこの設定として読み込み、
+直接倍率と Floating を使う。
 
 profile では、基準方式を `base_hispeed`、Floating の扱いを `floating_policy`、
 Normal の段階を `normal_hispeed_level` に保存する。直接倍率は `classic_hispeed`、

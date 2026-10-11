@@ -97,10 +97,10 @@ skin runtime は既読 sequence を再処理せず、timer はイベントの元
 打鍵からの経過時間を維持し、受領時刻から再生し直さない。見逃し・autoplay・replay・
 対戦相手は元の判定時刻を使い、現在のprofileの入力オフセットを差し引かない。
 表示履歴の800ms保持期間もこの表示時刻で計算する。採点用の `JudgementEvent`、
-FAST/SLOW、保存する結果・replay、キー音、順序付き `SkinRuntimeEvent` の時刻は変更しない。
+FAST/SLOW、保存する結果・replay、キー音、順序付き `SkinRuntimeEvent` の時刻には影響しない。
 
 自動 timing 調整で負方向へ visual offset が変わる場合は、描画投影の時刻だけを前回値以上に
-抑える。判定用 offset、保存値、FAST/SLOW、replay の時刻は変更しない。
+抑える。判定用 offset、保存値、FAST/SLOW、replay の時刻には影響しない。
 seek / retry は新しい generation なので、この visual floor もリセットする。
 
 ## Lifecycle
@@ -119,7 +119,7 @@ worker の停止は atomic flag と unpark で要求する。UI は終了済み�
 enqueue 時と callback の適用時に検査する。旧 worker の遅い送信を次の play に適用しない。
 
 worker はスコア確定時・終端遷移時に immutable `FinishSessionSnapshot` と graph を発行する。
-通常 play、course、replay、abort、結果画面への遷移はこの結果から従来の storage / IR 経路を呼ぶ。
+通常 play、course、replay、abort、結果画面への遷移はこの結果から storage / IR の保存・送信経路を呼ぶ。
 UI は終了要求を送った直後の古い観測値を保存せず、worker の確定結果を待つ。
 
 ### 途中FAILED時の譜面音声
@@ -135,8 +135,8 @@ UI は終了要求を送った直後の古い観測値を保存せず、worker �
   停止フラグを保持する。送信時とcallback適用時に要求を拒否し、遅着・並行送信からの
   再発音を防ぐ。workerの既存取消フラグとは別なので、worker破棄で停止自体は取り消されない。
 - callbackは停止フラグを観測した時点で `clear_playback()` により全voiceと予約を消去する。
-  キューの `try_lock` が失敗しても消去する。engineを取得できないcallbackは従来どおり無音で返し、
-  停止フラグは次回以降まで保持する。新しいロック待ち・I/O・ビジーループを追加しない。
+  キューの `try_lock` が失敗しても消去する。engineを取得できないcallbackは無音で返し、
+  停止フラグは次回以降まで保持する。callback内でロック待ち・I/O・ビジーループは行わない。
 - デコード済みsample bankを保持し、`clear_playback()` に伴うgainリセットは元の値へ戻す。
   pause状態、playback rate、音声時計は変えない。既にデバイスへ渡したバッファの巻き戻しは行わない。
 - 停止は当該sourceの寿命中は解除しない。同じ停止の再要求は安全で、`mark_draining()`でも
@@ -149,9 +149,9 @@ UI は終了要求を送った直後の古い観測値を保存せず、worker �
 RESULT退出時の既存フェードを維持する。GASで別ゲージへ移って続行する場合も停止しない。
 PlayStop、RESULTのBGM / SE、スキン音声は別のsystem sourceで再生し、この停止の対象外とする。
 
-AUTOPLAY / REPLAY / PRACTICE / コースも実際に `Failed` へ入る場合にだけ共通処理を使い、
-終了理由・画面遷移は変更しない。Viewerの終了・待機・一時停止・シークは従来の専用経路を維持する。
-スコア保存・IR・リプレイ記録の条件も変更しない。
+AUTOPLAY / REPLAY / PRACTICE / コースも実際に `Failed` へ入る場合にだけ共通処理を使う。
+この停止処理は終了理由・画面遷移と、スコア保存・IR・リプレイ記録の条件には影響しない。
+Viewerの終了・待機・一時停止・シークはViewer専用の経路で処理する。
 
 調査と回帰テスト、実機確認手順は
 [issue #26の作業記録](../notes/2026/2026-10-05-failed-chart-audio.md)を参照。
@@ -161,11 +161,11 @@ AUTOPLAY / REPLAY / PRACTICE / コースも実際に `Failed` へ入る場合に
 プロファイルの `play.wait_all_notes_result` は既定OFF。ONでは通常終了に使う
 `GameSession.result_wait_end_time` を、譜面末尾とノート・不可視ノート・BGM・通常BGA
 レイヤー（Base / Layer / Layer2）の最終配置時刻の最大値にします。その時刻から
-従来どおり譜面時刻で5秒の余白を経て終了します。PoorだけのBGA・BPM等の制御イベント・未使用音声定義・
+譜面時刻で5秒の余白を経て終了します。PoorだけのBGA・BPM等の制御イベント・未使用音声定義・
 PCM長は延長に使いません。`chart.end_time`、結果確定の `result_is_settled`、保存用の
 譜面長・identityを変えず、終了時の確定snapshotから既存Result遷移を通します。
 Practiceは設定の対象外で、Replay / Autoplay / Courseは通常終了時に適用します。
-手動終了と途中FAILEDには待機を追加せず、上記のFAILED音声停止を維持します。
+手動終了と途中FAILEDでは待機せず、上記のFAILED音声停止を行います。
 
 `play.play_keysound_on_miss` も既定OFF。ONでは見逃し処理から発音対象だけを
 `KeySoundEvent` として出し、既存schedulerのキー音音量・正規化・多重定義・同一音の
@@ -178,7 +178,7 @@ Practiceは設定の対象外で、Replay / Autoplay / Courseは通常終了時�
 `play.hide_misslayer_on_good` は既定OFF。ONの通常snapshot経路では表示判定履歴の
 発生順と `DisplayJudgementEvent.display_time` を使ってPGREAT / GREAT / GOOD時に
 ミスBGAを解除するため、正負の入力オフセットで解除を遅らせません。
-ミス画像は従来どおり判定の譜面時刻から選び、OFFでは従来の表示条件を維持します。
+ミス画像は判定の譜面時刻から選びます。OFFでは、GOOD以上の判定でミス画像を解除しません。
 
 ## Diagnostics と検証
 

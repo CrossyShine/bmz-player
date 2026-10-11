@@ -659,7 +659,7 @@ bundle した artifact を公開する前に `docs/licenses.md` を確認する�
 
 Core Audio IOProc音声は`experimental-coreaudio-ioproc` featureで有効にする実験用backendです。
 default featureに含まれ、通常のmacOSビルド・配布で選択できます。
-`Auto`と`Core Audio`は従来のCPAL / Audio Unit経路を維持し、設定でIOProcを明示選択した場合だけ使います。
+`Auto`と`Core Audio`はCPAL / Audio Unit経路を使い、設定でIOProcを明示選択した場合だけ使います。
 IOProc経路は入力streamのない機器だけにHAL IOProcを登録し、入力取得やprocess tapは使いません。
 非macOSまたはfeature無効のビルドでは候補を非表示にし、保存済みIOProc設定をAutoへ戻します。
 

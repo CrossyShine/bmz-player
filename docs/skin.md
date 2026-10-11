@@ -60,7 +60,7 @@ JSON / LuaのimageまたはBGAのdestinationに `ambient: true` を指定する�
   20％なら各辺に元サイズの10％ずつ広がり、letterboxの余白は含まない。
   複数のBGAレイヤーは表示矩形の和集合を基準に、同じ中心・倍率で拡大する。
   拡大後の外周にもぼかしの余白を設けて透明へ減衰させ、画面外はクリップする。
-- ぼかし50％は従来の強さ、100％は約2倍のぼかし幅。0％でもSpreadによる拡大は適用する。
+- ぼかし50％は基準の強さ、100％は約2倍のぼかし幅。0％でもSpreadによる拡大は適用する。
   ぼかし幅は拡大後の映像範囲（Fullではdestination）の長辺に比例し、縦横とも同じ画素幅になる。
 - 配置・透明度・timer・optionは通常のdestinationと同じ。BGA無効時はBGA由来のAmbientも非表示。
 - BGAのBase / Layer / Layer2（静止画の黒透過を含む）を合成してからぼかす。
@@ -83,9 +83,9 @@ ON時は画面の背面へAmbientを描き、「Ambientパネル透明度」で�
 レーン背景は対象外とし、不透明度100％を維持する。
 数値・テキスト、ノーツ、判定、グラフ本体の透明度は変えない。
 フレーム画像に含まれる装飾やラベルはフレームと一緒に透過する。
-Ambient ONでは従来の暗いcover-fit BGA背景を描かず、鮮明なfit-inside BGAを重ねる。
+Ambient ONではAmbient OFF時の暗いcover-fit BGA背景を描かず、鮮明なfit-inside BGAを重ねる。
 「BGAサイズ＝背景(1920x1080)」では鮮明なBGAも描かず、選択したFull／SpreadのAmbientだけを表示する。
-Ambient OFFでは従来のBGA描画を維持する。
+Ambient OFFではスキン本来のBGA描画を行う。
 曲BGAと汎用BGA/BGIの選択条件は既存の設定に従う。
 
 antiqueのBGA明るさは次の2つのoffsetで独立して調整する。範囲は-255～0、既定0。
@@ -93,7 +93,7 @@ antiqueのBGA明るさは次の2つのoffsetで独立して調整する。範囲
 | offset名 | ID | 対象 |
 | --- | --- | --- |
 | 前面BGAの明るさ(-255 ~ 0) | 54 | 余白を除くfit-insideの前面BGA／汎用BGA・BGI |
-| 背景/Ambient BGAの明るさ(-255 ~ 0) | 65 | 従来の暗いcover-fit背景とFull／Spread Ambient |
+| 背景/Ambient BGAの明るさ(-255 ~ 0) | 65 | Ambient OFF時の暗いcover-fit背景とFull／Spread Ambient |
 
 BGAサイズが「背景(1920x1080)」の場合は、Ambient OFFの鮮明なBGAも背景側の設定を使う。
 明るさは各destinationのRGBを `255 + 設定値` にすることで適用し、alphaを維持する。
@@ -119,7 +119,7 @@ type 5の選曲、type 7の通常リザルト、type 15のコースリザルト�
 ライブラリ、プロフィール設定、スコア保存、IR、リプレイ、リトライはBMZの処理を利用する。
 LR2固有のbutton / numberは変換時に内部参照へ分離し、beatorajaの同番号の意味を変えない。
 `LR2files/Theme/<theme>/...`形式のincludeは、同じスキンライブラリ内にある
-指定テーマの実ファイルを優先する。存在しない場合は従来の自テーマ内解決へ戻る。
+指定テーマの実ファイルを優先する。存在しない場合は自テーマ内で解決する。
 CSVの引用符はフィールド先頭で開く。引用されていない画像パス末尾の余分な引用符は
 パス正規化で除去し、後続のカンマやコメントを画像名へ混入させない。
 
@@ -182,7 +182,7 @@ LNは両キャップ間に横長の胴体を描画し、小節線・補助線も
 LIFT・lane cover・hidden coverのoffset（3..5）はX軸へ適用し、通常UIの座標は維持する。
 `DST_NOTE2`は横スクロール時には落下先Xとして扱う。
 参照実装で縦計算が残るLN/小節線も一貫して横へ流す点はBMZの補完動作。
-カバーの`disapearLine`による横向きcropは未対応で、従来の縦定義を使う。
+カバーの`disapearLine`による横向きcropは未対応で、縦方向の定義を使う。
 
 `#FONT`は`#LR2FONT`と別の番号表を使う。同番号のbitmap font宣言を優先し、
 system fontは`text.lr2SystemFont`に宣言サイズ・thickness・typeを保持する。
@@ -233,7 +233,7 @@ CSVやアーカイブを書き換えず、展開フォルダーも作成しな�
 - font/sourceキャッシュは仮想ファイル名を区別し、背後の `.dxa` の更新日時・サイズを追跡する。
   フォントの参照画像もキャッシュ依存に含める。
 - Luaの既存 `SkinPathContext` 制約を維持し、アーカイブ実体の正規化パスが許可root外なら拒否する。
-  フォントの参照画像にも同じroot制約を適用する。JSON/CSVの従来のパス解決方針は維持する。
+  フォントの参照画像にも同じroot制約を適用する。JSON/CSVのパス解決はこの制約の対象外とする。
 - 索引16MiB、1ファイルの格納・展開サイズ256MiB、10万entry、ディレクトリ深さ64に制限する。
   不正なoffset・循環参照・展開範囲外のLZ参照をエラーにする。
 
@@ -245,13 +245,13 @@ CSVやアーカイブを書き換えず、展開フォルダーも作成しな�
 LR2 play skin の `SRC_BUTTON 40/41` は、1P/2P の実際に有効なゲージ種類を
 LR2 の画像順（NORMAL / HARD / HAZARD / EASY / P-ATTACK / G-ATTACK）へ変換する。
 ASSIST EASY は EASY、EX HARD と段位ゲージは HARD の画像へフォールバックする。
-表示用 ref とクリック用 act は分離し、HS-FIX (`55`) は従来の参照を維持する。
+表示用 ref とクリック用 act は分離する。HS-FIX (`55`) は分離の対象外で、同じ番号を参照する。
 
 `SRC_NUMBER 10/11` は共通の現在HSを100倍して整数化する（例: `2.50 → 250`）。
 桁数はスキンの指定を維持するため、3桁欄ではHS 10以上の上位桁は表示できない。
 `127` は2Pゲージ残量の整数部。BATTLE skin type `12/13` の `121` は2P実EX SCOREを
-参照し、ターゲットスコアの有無に依存しない。通常playの `121` とJSON/Luaの参照は
-従来どおり。2P不在の数値は非表示とし、2Pの残量・スコアが0の場合は0を表示する。
+参照し、ターゲットスコアの有無に依存しない。通常playの `121` とJSON/Luaの参照には
+この扱いを適用しない。2P不在の数値は非表示とし、2Pの残量・スコアが0の場合は0を表示する。
 
 ## Selectのクリア状態・IR統計
 
@@ -284,7 +284,7 @@ beatorajaの名前付きプロパティを、BMZが既に扱う数値IDの評価
 | `main_state.number` / `text` / `option` の引数 | 各Integer / String / BooleanProperty |
 | `main_state.float_number` の引数 | FloatPropertyの番号付き名、FloatType、RateTypeの順 |
 
-`ref` は従来どおり数値です。特に `imageset.ref` のIndexTypeと
+`ref` は数値です。特に `imageset.ref` のIndexTypeと
 `imageset.value` のIntegerPropertyは異なる種類として扱います。
 `imageset.value` が負なら非表示、画像数以上なら先頭画像を選びます。
 JSONのFloatPropertyにあたる `slider.value` / `graph.value` はRateTypeだけを使い、
@@ -339,7 +339,7 @@ Selectでは選択中の譜面またはコースの最終保存プレイ日時�
 ローカル日時へ変換できる限り引き続き取得できます。値は起動環境のタイムゾーンを使います。
 `243` が `2147483647`（INT_MAX）ちょうどのときも、数字画像は既存のsentinel契約で
 非表示になります。Luaの `number` / `numbers` はその値を返します。
-`main_state.score_date_sec_time()` は従来どおり選択中の**BESTの日時**を返し、
+`main_state.score_date_sec_time()` は選択中の**BESTの日時**を返し、
 この最終日時とは分離します。保存・既存DB移行の詳細は [score-persistence.md](score-persistence.md) を参照します。
 
 ```lua
@@ -436,7 +436,7 @@ tableへ書き戻す。引数なしでは現在時刻を返し、`os.date`は`!`
 `Controllers.getControllers()`は入力のない空配列として`size` / `get()` / `first()`を
 提供する。`io`の書き込みstubは内容を永続化しない。初回document構築は、蓄積データを
 Luaで解析するResult skinも通せる専用の命令数上限を持ち、runtime callback単位の上限は
-従来の小さい値を維持する。
+それより小さい値とする。
 
 判定の存在を表すoption `2241..2246` (PGREAT / GREAT / GOOD / BAD / POOR / EMPTY POOR)
 はResultだけでなくPlay中も現在の判定数を参照する。これにより、LITONE11などが
@@ -460,7 +460,7 @@ canonical pathを取得できないディレクトリは走査しない。
 スキンの `resource:skins/` / `data:skins/` の相対パスとorigin、名前順の候補ソートは維持する。
 resourceとdataのrootが異なる場合はそれぞれ独立して走査する。
 サウンドセットは対応するBGM / SE音源が最初に見つかったディレクトリをルートとし、
-その直下の音源付きフォルダをバリエーションとして1つ選ぶ。補完用SEセットは従来の `clear` マーカーを使う。
+その直下の音源付きフォルダをバリエーションとして1つ選ぶ。補完用SEセットは `clear` マーカーで検出する。
 対応する固定名と`.wav` / `.ogg` / `.flac` / `.mp3`はASCIIの大文字小文字を区別せず検出する。
 親子の補完、RESULT BGMと全SEの優先選択、`.loop`指定は[サウンドセット仕様](system-sound.md)を参照する。
 `bgm_dir` / `se_dir`設定キーは維持する。親子両方に音源がある構成は、独立した複数セットではなく1セットとして扱う。
@@ -470,8 +470,8 @@ resourceとdataのrootが異なる場合はそれぞれ独立して走査する�
 skin library root 配下の Lua skin へ公開する初期 `package.path` は、過去の beatoraja と同じ
 `?.lua;skin/<skin entry directory>/?.lua` 形式にする。sandbox 内の実ファイル解決はこの論理
 パスを library root に対応付け、`require` / `dofile` / `loadfile` が root 外へ出ないことを
-別途検証する。library root を持たない低レベル API は、従来どおり entry directory の絶対
-パスを使う fallback を維持する。
+別途検証する。library root を持たない低レベル API は、entry directory の絶対
+パスを使う fallback で解決する。
 
 ## Skin Type
 
@@ -548,7 +548,7 @@ Gdx2DPixmap format と pixel buffer を RGBA8 へ展開する。MILLIONDOLLAR RE
 
 `gauge.nodes` が 4 / 8 / 12 枚だけ定義された skin は、beatoraja の
 `JsonSkinObjectLoader` と同じ index map で 36 段階へ展開する。これにより gauge type ごとの
-通常色・警告色・点滅色を取り違えずに表示する。36 枚定義は従来どおり直接対応させる。
+通常色・警告色・点滅色を取り違えずに表示する。36 枚定義はそのまま直接対応させる。
 
 ## PMchara
 
@@ -579,7 +579,7 @@ beatoraja互換のtext `overflow` は次の値を使用する。
 | `2` | destination幅へ収まる位置で文字列を打ち切る |
 
 `overflow: 1` の既定動作はbeatorajaと同じ横方向のみの縮小で、文字の高さとY位置を
-維持する。BMZ拡張の `shrinkMode: 1` を指定すると、従来のBMZと同じ縦横等比縮小へ
+維持する。BMZ拡張の `shrinkMode: 1` を指定すると、縦横等比縮小へ
 切り替わり、縮小後のtextはdestination内で上下中央に配置される。
 
 | `shrinkMode` | behavior |
@@ -610,7 +610,7 @@ BMZ default JSON では、digit atlas を同梱せずに既存フォントで数
 `text` 要素に BMZ 拡張の `numberRef`, `judgeRegion`, `judgeColor`, `judgeTimingRegion`,
 `judgeTimingColor`, `prefix`, `suffix` を使える。
 `numberRef` は既存の `value.ref` と同じ `SkinDrawState` number ref を文字列化し、
-未取得時は空文字として扱う。外部 beatoraja JSON skin の `value` sprite 表示は従来通り。
+未取得時は空文字として扱う。外部 beatoraja JSON skin の `value` sprite 表示には影響しない。
 `judgeRegion` は最新判定の表示領域 index (通常は `0`) を文字列化し、判定タイマーが
 非アクティブなら空文字として扱う。`judgeColor` は `judgeRegion` 用の表示色を判定種別で
 切り替え、PGREAT は水色、GREAT / GOOD は黄色、BAD / POOR / EMPTY POOR は赤で表示する。
@@ -657,7 +657,7 @@ ADFX02/ECFNのBMZ拡張版も通常パネルの1P/2P選択枠に344/345を使い
 
 ### BMZ Attempt Session Mode Ref
 
-beatoraja 互換の assist `ref` / `event_index` `73` は従来どおり 2 値を返す。
+beatoraja 互換の assist `ref` / `event_index` `73` は beatoraja と同じ 2 値を返す。
 `NORMAL` / `PRACTICE` / `G-BATTLE`は`0`、`AUTOPLAY` / `AUTOPLAY BATTLE`は`1`とし、
 既存 skin の 2 行 option panel を崩さない。
 
@@ -938,7 +938,7 @@ destination に `act` / `click` を置くと、text や panel も image / images
 ### BMZ Select DETAIL OPTIONS v1
 
 新詳細パネル（互換panel 2）の操作状態を公開する。experimental ON時の物理入力はE1開閉／E2切替。設定そのものの既存ref/eventと独立した名前空間で、
-既存event 301..307をカーソル操作に読み替えない。event 302は従来通りSCROLL REMOVEの
+既存event 301..307をカーソル操作に読み替えない。event 302はSCROLL REMOVEの
 トグルであり、表示時間制御のCONSTANTはevent 400のまま。
 項目・適用条件・操作設計は[DETAIL OPTIONS仕様](select-detail-options.md)を参照する。
 
@@ -946,17 +946,17 @@ destination に `act` / `click` を置くと、text や panel も image / images
 （Luaでは返却するskin table）で`"bmzDetailOptions": 1`と`"bmzDetailOptionsNumbers": true`を
 明示した選曲スキン（type 5）で、新詳細の表示と2パネル入力を有効にする。
 Numbers宣言は数値行の現在値を表示でき、本体の数値編集操作に対応することを表す。
-同梱3スキンは現在値のみを表示し、＋／−ボタンは置かない。旧v1宣言だけでは従来操作に戻る。
+同梱3スキンは現在値のみを表示し、＋／−ボタンは置かない。v1宣言だけの場合は3パネル方式の操作になる。
 
 本体はselectの読込optionに予約キー`bmz_detail_options`を文字列`"1"`/`"0"`で渡す。
 Luaは`bmz.get_option("bmz_detail_options", "0")`を確認し、OFFなら旧Assist表示を残すこと。
 カスタマイズpropertyとして登録・保存しない。本体が値を上書きし、キャッシュの識別にも含める。
 OFF→ON／ON→OFFは選曲スキンを再ロードする。JSONは新option 19300とその否定で新旧を区別できる。
-OFF・未対応時はpanel 1/2/3を従来のholdで開く。ON・対応時はpanel 1/2だけを使い、
+OFF・未対応時はpanel 1/2/3をholdで開く。ON・対応時はpanel 1/2だけを使い、
 固定表示中でもoption/timerは実際に表示するパネルを表す。物理E1/E2のhold参照は変更しない。
-宣言なし、0、未知のversionでは従来のbeatoraja式Assist表示・固定7鍵操作・旧クリックを維持し、
+宣言なし、0、未知のversionではbeatoraja式のAssist表示・固定7鍵操作・クリック操作を使い、
 本体の新UIを重ねない。一つのrefの使用だけでは対応を推定しない。
-スキンなしでは本体の旧ASSIST OPTIONSを使う。互換option 22、panel 2、開閉timerは変更しない。
+スキンなしでは本体の3パネル方式のASSIST OPTIONSを使う。互換option 22、panel 2、開閉timerは変更しない。
 未宣言時は新snapshotを生成せず、各ref/text/optionは非表示値、新eventはno-opとする。
 
 対応スキンはoption 19300でパネルを出し、7可視項目をvalidで条件付け、選択項目を
@@ -979,7 +979,7 @@ E2から離れて300ms未満だけ、最後の項目snapshotと列のスクロ�
 300ms経過、E2再オープン、フォーカス喪失、別モーダル・画面への遷移で保持表示を終了する。
 途中で詳細→通常→パネルなしへ移っても詳細の退場時間は再起動しない。
 保持期間後は下記の非表示値に戻る。Close宣言なしの対応スキンでは、新snapshotは解放時に終了する。
-未対応スキンの従来パネルの開閉演出には影響しない。
+未対応スキンの3パネル方式の開閉演出には影響しない。
 互換option 22は詳細を閉じる／通常へ切り替える時にfalse、timer 32は0msから開始し、それらの意味は変更しない。新規IDの追加はない。
 
 同梱のBMZ拡張版mz-selectもこのAPIを利用する。`default_detailoptions/parts.lua`の正常ロード時に
@@ -989,7 +989,7 @@ E2から離れて300ms未満だけ、最後の項目snapshotと列のスクロ�
 Luxez-FlatのBMZ拡張版も同じAPIを利用する。`select_skinparts/default_detailoptions/parts.lua`の
 正常ロード時だけ対応宣言し、旧`default_optionpanel`内のE2開閉destinationとtimerなしのE2 hover領域を置換する。
 E1/E1+E2は同じ画像IDを共用する場合もあるため、ID全体で除去しない。
-部品の無効・欠落・失敗時とBMZ以外では従来のAssistへ戻る。新規APIの採番はない。
+部品の無効・欠落・失敗時とBMZ以外では3パネル方式のAssistを使う。新規APIの採番はない。
 [表示・互換仕様](select-detail-options.md#luxez-flat)を参照。
 
 別途導入するADFX02/ECFNの拡張版も同じAPIを使う。`select/bmz_detail_options.lua`の正常構築後に
@@ -1162,7 +1162,7 @@ index は 0 始まり。`image` は songlist 用 imageset の `images`、
 | `閉じる` | 10 | 13 | 検索フォルダ `6 / 10` → 曲フォルダ `1 / 4` |
 
 専用 slot が配列長の外なら表の順に fallback し、曲フォルダ slot もなければ先頭 slot を使う。
-このため、既存 skin は変更しなくても従来と同じ画像・文字 destination で表示される。
+このため、専用 slot を持たない skin も、変更なしで既存の画像・文字 destination で表示される。
 image index `7` は既存 skin が no-song bar に使用するため、BMZ 専用 image slot は `8` から始める。
 
 行種別を destination 条件や imageset の選択に使う場合は次の BMZ ref / option を使う。
@@ -1230,7 +1230,7 @@ beatoraja result skin互換の `450..469` は、BMZではplay/select skinにも�
 | 460..466 | 2P key 1..7 の元レーン番号 |
 | 469 | 2P Scratch の元レーン番号 |
 
-`467` / `468` はbeatorajaに対応する定義がないため未使用。resultでは従来どおり
+`467` / `468` はbeatorajaに対応する定義がないため未使用。resultでは
 RANDOM / R-RANDOM / RANDOM-EX（ScratchはRANDOM-EXのみ）の固定配置を返す。
 playでは現在プレイ中の同じ固定配置を返す。selectでは「このまま開始した場合に
 適用する予定の配置」を返し、通常の未抽選RANDOMや予定配置がない場合は全て `0`。
@@ -1469,7 +1469,7 @@ OpenLR2の原仕様と異なりPOOR / EMPTY POORも合計へ含む。
 }
 ```
 
-`resultIrScopeBinding` は省略時または `global` で従来互換の全体ランキング固定、`active`
+`resultIrScopeBinding` は省略時または `global` で全体ランキング固定、`active`
 では既存の IR number / text / option が選択中スコープを表示する。`resultIrScopeToggle` は
 省略時または `none` で E1 切替を無効にし、`e1_press` は IR パネル表示中の E1 press edge
 でスコープを切り替える。`resultIrScopeToggle` は `active` binding と組み合わせた場合だけ
@@ -1515,7 +1515,7 @@ IR パネルを自動では開かない。E2 / Select の IR・グラフ切替�
 }
 ```
 
-`selectIrScopeBinding` は省略時または `global` で従来互換の全体ランキング固定、`active` では
+`selectIrScopeBinding` は省略時または `global` で全体ランキング固定、`active` では
 既存の IR number / text / option が選択中scopeを表示する。`selectIrScopeToggle` は省略時または
 `none` で E3切替を無効にし、`e3_press` は通常の選曲表示中の E3 press edge でscopeを切り替える。
 `active` binding 以外との組み合わせ、検索・設定編集・選曲オプションパネル表示中、またはRival
@@ -1589,7 +1589,7 @@ profile の `[skin]` は key mode ごとに play skin path と設定を持つ。
 `White`, `Blue`, `Yellow`, `Scratch`。既定値は `Yellow, White, Blue, White, White, Blue, White, Yellow`。
 
 5K 版は `Notes 5Key Color` property でノーツ色の並びを選択できる。
-`Default` は従来通り `Scratch, White, Blue, Yellow, Blue, White`
+`Default` は `Scratch, White, Blue, Yellow, Blue, White`
 (scratch left 時の画面左からの並び)。`6Key-like` は scratch side に関わらず、
 画面左から `White, Blue, White, White, Blue, White` になる。
 

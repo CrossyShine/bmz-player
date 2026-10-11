@@ -469,7 +469,7 @@ BMZ_RIANIR_DEV_CLIENT_HASH="<個人用の小文字64桁hex>" cargo run -r -p bmz
 
 開発用固定値が未設定のdebug build、固定値の形式が不正なbuild、実行ファイルhashの
 取得に失敗したrelease buildだけ、暫定互換値 `UNKNOWN` を送る。固定値が未設定の
-release buildは従来どおり実行ファイルのSHA-256を送る。
+release buildは実行ファイルのSHA-256を送る。
 
 Flatpakは配布 `.flatpak` 全体ではなく、`flatpak-builder` が最終配置した
 `build/files/bin/bmz-player`（実行時の `/app/bin/bmz-player`）をhash対象にする。

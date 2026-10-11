@@ -8,8 +8,8 @@ Regular users only need the runtime archive; the sources archive is for rebuildi
 The build enables `pulseaudio,pipewire,linux-evdev`. It bundles the pinned
 PipeWire 1.4.9 client, native-protocol/client-node/adapter/metadata/rt modules,
 SPA support/audioconvert plugins and a private client configuration. It ships no
-audio server, services, PAM or udev policy. The Ubuntu 22.04/glibc baseline stays
-unchanged. Auto still prefers PulseAudio then ALSA; PipeWire and evdev are opt-in.
+audio server, services, PAM or udev policy. The baseline is Ubuntu 22.04/glibc 2.35.
+Auto prefers PulseAudio then ALSA; PipeWire and evdev are opt-in.
 See [Linux latency verification](linux-latency.md) for dependencies, permissions,
 diagnostics and rollback. The launcher sets package-local PipeWire/SPA/config
 search paths only if callers did not already set them; it never forces a quantum.
@@ -140,7 +140,7 @@ It checks the archive version/commit against release metadata and combines the
 Linux tar client hash with the Windows, macOS and Flatpak builds. The hash is
 from the verified packaged executable after `patchelf`, not the launcher or tarball.
 Both archives and the signed unified `release.json` enter the final `SHA256SUMS.txt`.
-The release no longer attaches a separate client manifest; rianIR reads the
+The release attaches no separate client manifest; rianIR reads the
 top-level `builds` in `release.json`. See [Release metadata](release-metadata.md).
 Download corresponding sources from the same Release as the runtime; GitHub's
 automatic source snapshot does not include vendored dependencies or Ubuntu/FFmpeg sources.

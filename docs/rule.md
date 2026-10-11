@@ -47,9 +47,8 @@ BMS-IR は対応 rule mode の制約により DX を送信対象にしない。
 コンボ、ゲージは、25～300%の視聴速度、途中の速度変更、描画間隔に依存しない。
 入力に記録された時刻自体は丸めず、そのままノーツ時刻と比較する。
 
-Practiceなどの実入力は従来どおり、譜面時間の判定窓を再生速度倍に補正して
-実時間の判定幅を維持する。表示オフセットは採点には適用しない。
-リプレイファイルの形式と既存スコアの保存データは変更しない。
+Practiceなどの実入力は、譜面時間の判定窓を再生速度倍に補正して
+実時間の判定幅を保つ。表示オフセットは採点には適用しない。
 
 ### タイミンググラフの判定帯
 
@@ -62,8 +61,8 @@ replay は視聴速度に依存しない窓を使う。`#EXRANK` / chA0 の非�
 Result は終了時点の最終判定窓を保持し、終了後のプロフィール設定から再計算しない。
 コース全体のグラフは最後にプレイした曲の最終窓を使う。履歴の各判定時点や各曲ごとに
 背景の判定帯を切り替える表示ではない。セッション未生成の placeholder / debug 表示は
-rule mode と key mode・判定ランクから補完し、不明な rule mode は従来の beatoraja 相当とする。
-この表示情報は実行時だけ保持し、スコア・replay の保存形式や採点処理は変更しない。
+rule mode と key mode・判定ランクから補完し、不明な rule mode は beatoraja 相当とする。
+この表示情報は実行時だけ保持し、スコア・replay の保存データや採点処理には使わない。
 
 ### Beatoraja
 
@@ -310,7 +309,7 @@ AssistEasy から ExHard までの減少量は、LR2orajaED-rian の
 `c980834957b03195880544ced49c9ee94890557b` に合わせる。
 この補正は 9K DX の BAD / POOR / EMPTY POOR と、BAD の半分を適用する
 HCN 早離し中の継続ダメージに反映される。回復量、下限・上限・クリア境界、
-Hazard / Class 系、9K 以外の DX と他の RuleMode は変更しない。
+Hazard / Class 系、9K 以外の DX と他の RuleMode には適用しない。
 
 AssistEasy から ExHard までの正の回復量には次の POP TOTAL を使う。
 除算と `floor` は LR2oraja Endless Dream と同じ整数切り捨てを含む。
@@ -366,7 +365,7 @@ replay 再生結果はローカルスコアを更新せず、IR にも送信し�
 
 新規プレイは補正後のゲージで保存・IR 送信を行う。score / replay の形式と
 `RuleMode::Dx` の保存キーは変えず、IR のルール識別子も既存のまま扱う
-（BMZ公式IR は `Dx`、rianIR は `body=DX MODE`）。BMS-IR は従来どおり DX を
+（BMZ公式IR は `Dx`、rianIR は `body=DX MODE`）。BMS-IR は DX を
 送信対象にしない。
 ゲージ係数の世代ではランキングを分離しないため、過去の DX スコアと同じ区分になる。
 送信条件は [score-persistence.md](score-persistence.md) を参照する。
