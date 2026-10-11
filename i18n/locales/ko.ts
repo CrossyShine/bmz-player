@@ -88,7 +88,7 @@ export default defineI18nLocale(() =>
       manual: {
         title: '매뉴얼',
         description: 'BMZ Player 시작 방법, 조작 방법, 문제 해결 방법을 정리했습니다.',
-        englishOnly: '매뉴얼은 현재 일본어와 영어로만 제공되며, 영어판을 표시합니다.',
+        englishOnly: '이 언어의 매뉴얼은 아직 없어 영어판을 표시합니다.',
         previous: '이전: {title}',
         next: '다음: {title}',
       },

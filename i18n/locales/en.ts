@@ -92,7 +92,7 @@ export default defineI18nLocale(() =>
         description:
           'How to get started with BMZ Player, how to play, and what to do when something goes wrong.',
         englishOnly:
-          'The manual is available in Japanese and English. The English version is shown.',
+          'The manual is not available in this language yet, so the English version is shown.',
         previous: 'Previous: {title}',
         next: 'Next: {title}',
       },

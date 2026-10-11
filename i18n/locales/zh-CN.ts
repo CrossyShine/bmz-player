@@ -85,7 +85,7 @@ export default defineI18nLocale(() =>
       manual: {
         title: '使用手册',
         description: '介绍 BMZ Player 的入门方法、操作方式以及常见问题的解决办法。',
-        englishOnly: '使用手册目前仅提供日语和英语版本，此处显示英语版。',
+        englishOnly: '此语言的使用手册尚未提供，因此显示英语版。',
         previous: '上一页：{title}',
         next: '下一页：{title}',
       },

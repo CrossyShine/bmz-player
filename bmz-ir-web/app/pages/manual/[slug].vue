@@ -2,7 +2,7 @@
 const route = useRoute()
 const localePath = useLocalePath()
 const { t } = useI18n()
-const { pages, showsFallback, pagePath } = useManual()
+const { manualLocale, pages, showsFallback, pagePath } = useManual()
 
 const slug = computed(() => String(route.params.slug))
 const index = computed(() => pages.value.findIndex((page) => page.slug === slug.value))
@@ -14,7 +14,9 @@ if (!page.value) {
   throw createError({ statusCode: 404, statusMessage: 'Not Found' })
 }
 
-const html = computed(() => (page.value ? renderManualMarkdown(page.value.markdown, pagePath) : ''))
+const html = computed(() =>
+  page.value ? renderManualMarkdown(page.value.markdown, manualLocale.value, pagePath) : '',
+)
 
 // 原稿内のページ間リンクは、ページを読み直さずに移動する。
 function onContentClick(event: MouseEvent) {
