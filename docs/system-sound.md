@@ -22,7 +22,7 @@ default_sound_dir = "data/defaultsound"
 設定した`bgm_dir`自体に対応音源がある場合は、そこが1セットのルートになります。
 探索時は対応する固定名・拡張子のファイルがあるかで判断し、デコード可否は読み込み時に確認します。
 
-補完用SEセットは、`se_dir`配下の`clear`音源があるディレクトリを再帰走査します。
+補完用SEセットは、`se_dir`配下の`clear`または対応する`.enter`音源があるディレクトリを再帰走査します。
 候補の走査は起動時とprofile切替時に行い、起動時とSelect復帰時にサウンドセットと補完用SEセットを
 それぞれ1セットずつ抽選します。Selectを離れた後は適用済みセットを保持し、
 Decide / Play / Resultで別セットへ切り替えません。Selectを経由しないリトライも同じセットです。
@@ -97,11 +97,11 @@ FAILEDをランクより優先します。ランク判定はResult表示と同�
 バリエーション利用時もランクを先に判定し、AAAなら子の`aaa`、親の`aaa`、子の`clear`、親の`clear`、
 同ランクSE、`clear` SEの順です。親に`aaa`がある場合は子の汎用`clear`より優先します。
 
-BGMが選ばれた場合、clear / fail SEは同時に鳴らしません。BGMの音量が0でもSEへ戻しません。
+BGMが選ばれた場合、従来のclear / fail SEは同時に鳴らしません。BGMの音量が0でもSEへ戻しません。
 単発BGMの終了後にclear / fail SEを追加再生することもありません。
 RESULT BGMは選択中のサウンドセット内だけを探索します。SEセットや既定音源内の
 `clear` / `fail` / `a` / `aa` / `aaa`は単発SEとして使い、RESULT BGMがない場合に再生します。
-COURSE RESULT専用BGMは追加せず、既存の`course_clear` / `course_fail`を使います。
+COURSE RESULTは後述の専用BGMと入場SEを使います。
 コース曲間の通常Resultは通常RESULT BGMの規則を使います。
 
 ### 単発とループ
@@ -118,7 +118,45 @@ RESULT BGMは通常名なら単発、音源拡張子の直前に`.loop`を付け
 対象は`clear` / `fail` / `a` / `aa` / `aaa`です。同じフォルダに通常版と`.loop`版が両方ある場合は
 `.loop`版を先に試します。途中のループ区間指定はなく、音源の末尾から先頭へ戻ります。
 既存Select BGMは引き続きループ、Decide BGMとSEは引き続き単発です。
-SEに`.loop`を付けてもループSEとしては認識しません。
+対象外のSEに`.loop`を付けてもループSEとしては認識しません。
+
+### 独立した入場SEとBGM
+
+`<name>.enter.<ext>`は画面入場時に1回鳴るSE、`<name>.loop.<ext>`は画面表示中の
+ループBGMです。SEの終了を待たずにBGMを開始し、それぞれシステムSE音量、システムBGM音量を使います。
+BGMだけシステムBGM正規化の対象です。従来名の意味は変わりません。
+
+| 画面 | 対応するname | 入場SE | BGM |
+|---|---|---|---|
+| Select | `select` | `select.enter` | `select.loop` → `select`（どちらもループ） |
+| 通常RESULT | `clear` / `fail` / `a` / `aa` / `aaa` | `<name>.enter` | `<name>.loop` → `<name>`（通常名は単発） |
+| COURSE RESULT | `course_clear` / `course_fail` | `<name>.enter` → 従来SE | `<name>.loop`のみ |
+
+`.enter`は子、親、補完用SEセット、既定音源の順に探索します。
+通常RESULT BGMとCOURSE RESULT BGMは子・親だけを探索し、補完用SEセットや既定音源の
+`.loop`を流用しません。Select BGMは子、親、既定音源の順で、各層で`.loop`を通常名より優先します。
+`.enter`や`.loop`だけのサウンドセット・子バリエーションも認識します。
+拡張子・大小文字・デコード失敗時の次候補への補完は共通規則に従います。
+
+通常RESULTでは、SEとBGMを独立してランク選択します。AAAは`aaa.enter` → `clear.enter`、
+AAは`aa.enter` → `clear.enter`、Aは`a.enter` → `clear.enter`です。
+BGMは同ランクの`.loop` → 通常名、続いて`clear.loop` → `clear`を使います。
+各音種について子、親を探索してから汎用音種へ戻り、下位ランクへ段階的には戻りません。
+FAILEDは`fail.enter`と`fail.loop` → `fail`を使います。
+明示的な入場SEが読み込めた場合はBGMと同時に鳴らし、従来SEは重ねません。
+入場SEがない場合は従来のBGM優先・SEフォールバックを維持します。
+
+COURSE RESULTのSEは`course_clear.enter` / `course_fail.enter`を優先し、なければ
+従来の`course_clear` / `course_fail`、さらに従来のRESULT `clear` / `fail` SEへ戻ります。
+SEは1つだけ鳴らし、専用`.loop` BGMがあれば同時に開始します。
+通常RESULTの`clear.loop`等をCOURSE RESULTへ流用しません。
+
+Select入場SEは初回起動、RESULT復帰、Decideキャンセル復帰など画面入場ごとに最大1回再生します。
+再抽選したセットの非同期ロード中は待機し、旧セットの入場SEを鳴らしません。
+同じセットの再利用でもロード完了時に1回だけ鳴らします。フォルダー移動やプレビュー切替では鳴らしません。
+入場SEはプレビューの有無に依存せず、Viewer待機中は既存の音声抑制に従います。
+Select退出時は入場SEも停止します。RESULT退出時は追加した入場SE・専用BGMも既存のフェード対象です。
+`resultclose` / `course_close`の再生タイミングは変更しません。
 
 Result退出時は単発・ループのどちらも既存の音声フェードに合わせて停止します。
 Select復帰・リトライ・コース遷移・profile切替でRESULT BGMを持ち越しません。
@@ -170,7 +208,7 @@ OSやファイルシステムに関係なく、固定の音源名・`.loop`・�
 各優先段階の候補を順にデコードし、欠落・デコード失敗時は次の候補へ進みます。
 全候補が利用できなければ、その音種を無音で継続します。
 
-Select / Decide / RESULT BGMはシステムBGM音量とシステムBGM正規化の対象です。
+Select / Decide / 通常RESULT / COURSE RESULT BGMはシステムBGM音量とシステムBGM正規化の対象です。
 上書きしたSEとRESULT入口SEはシステムSE音量を使い、BGM正規化を適用しません。
 いずれもマスター音量を乗算します。音量変更と、解析済みBGMの正規化ON/OFFは再生中にも反映します。
 正規化OFFで読み込んだセットに対して後からONにした場合は、現在の音源を非同期に解析し、

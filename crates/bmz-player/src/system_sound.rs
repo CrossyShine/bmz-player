@@ -10,6 +10,7 @@
 //! - SEはサウンドセット、SEセット、`defaultsound/` の順に解決する。
 //!   RESULT入口音はサウンドセットではBGM、SEセットと既定音源では単発SEとして扱う。
 //! - RESULT BGMはサウンドセット内だけから解決し、`.loop` 付きならループする。
+//! - `.enter`は独立した単発SE、COURSE RESULTの`.loop`は専用BGMとして解決する。
 //!
 //! 本モジュールは「どのファイルを使うか」までを決めるところまでが責務。
 //! 実際の AudioEngine への投入や再生は呼び出し側で行う。
@@ -59,10 +60,20 @@ pub enum SoundType {
     ResultA,
     ResultAA,
     ResultAAA,
+    SelectEnter,
+    ResultEnterClear,
+    ResultEnterFail,
+    ResultEnterA,
+    ResultEnterAA,
+    ResultEnterAAA,
+    CourseEnterClear,
+    CourseEnterFail,
+    CourseBgmClear,
+    CourseBgmFail,
 }
 
 impl SoundType {
-    pub const ALL: [SoundType; 31] = [
+    pub const ALL: [SoundType; 41] = [
         SoundType::Scratch,
         SoundType::FolderOpen,
         SoundType::FolderClose,
@@ -94,14 +105,36 @@ impl SoundType {
         SoundType::ResultA,
         SoundType::ResultAA,
         SoundType::ResultAAA,
+        SoundType::SelectEnter,
+        SoundType::ResultEnterClear,
+        SoundType::ResultEnterFail,
+        SoundType::ResultEnterA,
+        SoundType::ResultEnterAA,
+        SoundType::ResultEnterAAA,
+        SoundType::CourseEnterClear,
+        SoundType::CourseEnterFail,
+        SoundType::CourseBgmClear,
+        SoundType::CourseBgmFail,
     ];
 
-    pub const RESULT_BGMS: [SoundType; 5] = [
+    pub const RESULT_BGMS: [SoundType; 7] = [
         SoundType::ResultBgmClear,
         SoundType::ResultBgmFail,
         SoundType::ResultBgmA,
         SoundType::ResultBgmAA,
         SoundType::ResultBgmAAA,
+        SoundType::CourseBgmClear,
+        SoundType::CourseBgmFail,
+    ];
+
+    pub const RESULT_ENTERS: [SoundType; 7] = [
+        Self::ResultEnterClear,
+        Self::ResultEnterFail,
+        Self::ResultEnterA,
+        Self::ResultEnterAA,
+        Self::ResultEnterAAA,
+        Self::CourseEnterClear,
+        Self::CourseEnterFail,
     ];
 
     /// beatoraja 既定のファイル名(セットディレクトリ直下から探す)。
@@ -109,6 +142,16 @@ impl SoundType {
     /// のいずれの拡張子でも解決される(beatoraja と同じく `.ogg` 等もサポート)。
     pub fn file_name(&self) -> &'static str {
         match self {
+            Self::SelectEnter => "select.enter.wav",
+            Self::ResultEnterClear => "clear.enter.wav",
+            Self::ResultEnterFail => "fail.enter.wav",
+            Self::ResultEnterA => "a.enter.wav",
+            Self::ResultEnterAA => "aa.enter.wav",
+            Self::ResultEnterAAA => "aaa.enter.wav",
+            Self::CourseEnterClear => "course_clear.enter.wav",
+            Self::CourseEnterFail => "course_fail.enter.wav",
+            Self::CourseBgmClear => "course_clear.loop.wav",
+            Self::CourseBgmFail => "course_fail.loop.wav",
             SoundType::Scratch => "scratch.wav",
             SoundType::FolderOpen => "f-open.wav",
             SoundType::FolderClose => "f-close.wav",
@@ -162,7 +205,7 @@ impl SoundType {
     }
 
     pub fn loops(&self) -> bool {
-        matches!(self, SoundType::Select)
+        matches!(self, SoundType::Select | Self::CourseBgmClear | Self::CourseBgmFail)
     }
 }
 
@@ -270,7 +313,7 @@ pub struct SoundSetSelection {
     pub bgm_dir: Option<PathBuf>,
     /// root直下から抽選されたバリエーション。全音種で共通して使う。
     pub bgm_variant_dir: Option<PathBuf>,
-    /// SE セットディレクトリ。`clear.wav` を含むディレクトリ。
+    /// SE セットディレクトリ。従来の`clear`または対応する`.enter`を含む。
     pub se_dir: Option<PathBuf>,
     /// `defaultsound/` のパス。各ファイルのフォールバック検索に使う。
     pub default_dir: Option<PathBuf>,
@@ -349,7 +392,9 @@ impl SoundSetIndex {
         );
         if include_soundset {
             for layer in soundset_layers.into_iter().flatten() {
-                if sound_type.is_result_bgm() {
+                if sound_type == SoundType::Select
+                    || (sound_type.is_result_bgm() && !sound_type.loops())
+                {
                     candidates.extend(
                         layer
                             .files(&format!("{stem}.loop"))
@@ -371,6 +416,14 @@ impl SoundSetIndex {
         let fallback_layers =
             [(!sound_type.is_bgm()).then_some(self.se.as_ref()).flatten(), self.default.as_ref()];
         for layer in fallback_layers.into_iter().flatten() {
+            if sound_type == SoundType::Select {
+                candidates.extend(
+                    layer
+                        .files("select.loop")
+                        .into_iter()
+                        .map(|path| ResolvedSystemSound { path, loop_playback: true }),
+                );
+            }
             for path in layer.files(stem) {
                 if !candidates.iter().any(|candidate| candidate.path == path) {
                     candidates
@@ -443,7 +496,8 @@ fn is_supported_sound_path(path: &Path, sound_type: SoundType) -> bool {
         return false;
     }
     stem.eq_ignore_ascii_case(sound_type.stem())
-        || (sound_type.is_result_bgm()
+        || (((sound_type.is_result_bgm() && !sound_type.loops())
+            || sound_type == SoundType::Select)
             && stem.eq_ignore_ascii_case(&format!("{}.loop", sound_type.stem())))
 }
 
@@ -480,7 +534,14 @@ fn scan_sound_sets_into(
         let path = entry.path();
         if path.is_dir() {
             scan_sound_sets_into(&path, marker_stem, out, scan);
-        } else if !has_marker && is_marker_file(&path, marker_stem) {
+        } else if !has_marker
+            && (is_marker_file(&path, marker_stem)
+                || (marker_stem == "clear"
+                    && (SoundType::RESULT_ENTERS
+                        .into_iter()
+                        .chain([SoundType::SelectEnter])
+                        .any(|sound| is_supported_sound_path(&path, sound)))))
+        {
             has_marker = true;
         }
     }
@@ -541,6 +602,33 @@ fn pick_random(paths: &[PathBuf]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_entry_and_loop_files_are_discovered_case_insensitively() {
+        let dir = temp_dir("enter-loop-only");
+        for name in
+            ["SELECT.ENTER.MP3", "SELECT.LOOP.FLAC", "COURSE_CLEAR.LOOP.OGG", "AAA.ENTER.WAV"]
+        {
+            std::fs::write(dir.join(name), b"fixture").unwrap();
+        }
+        assert_eq!(scan_bgm_sound_sets(&dir).len(), 1);
+        assert_eq!(scan_sound_sets(&dir, "clear.wav"), vec![dir.clone()]);
+        let selection = SoundSetSelection { bgm_dir: Some(dir.clone()), ..Default::default() };
+        assert_eq!(selection.resolve(SoundType::SelectEnter), Some(dir.join("SELECT.ENTER.MP3")));
+        assert_eq!(
+            selection.candidates(SoundType::Select),
+            vec![ResolvedSystemSound { path: dir.join("SELECT.LOOP.FLAC"), loop_playback: true }]
+        );
+        assert!(selection.candidates(SoundType::CourseBgmClear)[0].loop_playback);
+        let fallback = SoundSetSelection {
+            se_dir: Some(dir.clone()),
+            default_dir: Some(dir.clone()),
+            ..Default::default()
+        };
+        assert!(fallback.candidates(SoundType::CourseBgmClear).is_empty());
+        assert!(fallback.candidates(SoundType::ResultBgmAAA).is_empty());
+        assert_eq!(fallback.resolve(SoundType::ResultEnterAAA), Some(dir.join("AAA.ENTER.WAV")));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use super::*;
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -565,7 +653,10 @@ mod tests {
         assert!(!SoundType::Landmine.is_bgm());
         for sound in SoundType::RESULT_BGMS {
             assert!(sound.is_bgm());
-            assert!(!sound.loops());
+            assert_eq!(
+                sound.loops(),
+                matches!(sound, SoundType::CourseBgmClear | SoundType::CourseBgmFail)
+            );
         }
         for sound in [SoundType::ResultA, SoundType::ResultAA, SoundType::ResultAAA] {
             assert!(!sound.is_bgm());

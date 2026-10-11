@@ -393,10 +393,14 @@ impl WinitApp {
         }
         if !normalization_only && result.prepared.reused_existing_sound_set {
             tracing::info!(generation = result.generation, "reused unchanged system sound set");
-            if should_play_select_bgm_on_enter(
-                self.select.select_assets.preview_playing(),
-                self.audio.pending_system_sound.is_some(),
-            ) {
+            self.play_pending_select_enter();
+            if matches!(self.view_state(), AppViewState::Select)
+                && !self.viewer_waiting
+                && should_play_select_bgm_on_enter(
+                    self.select.select_assets.preview_playing(),
+                    self.audio.pending_system_sound.is_some(),
+                )
+            {
                 self.play_system_sound(crate::system_sound::SoundType::Select);
             }
             return;
@@ -434,6 +438,7 @@ impl WinitApp {
         };
         if let Some(manager) = &self.audio.system_sound {
             manager.stop_all_bgm();
+            manager.stop(crate::system_sound::SoundType::SelectEnter);
         }
         self.audio.system_sound_normalization_generation =
             self.audio.system_sound_normalization_generation.wrapping_add(1);
@@ -445,7 +450,9 @@ impl WinitApp {
                 normalize_bgm_volume,
             ));
         self.sync_realtime_profile_settings();
+        self.play_pending_select_enter();
         if matches!(self.view_state(), AppViewState::Select)
+            && !self.viewer_waiting
             && should_play_select_bgm_on_enter(
                 self.select.select_assets.preview_playing(),
                 self.audio.pending_system_sound.is_some(),

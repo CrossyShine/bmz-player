@@ -343,6 +343,7 @@ impl WinitApp {
         ]
         .into_iter()
         .chain(SoundType::RESULT_BGMS)
+        .chain(SoundType::RESULT_ENTERS)
         {
             manager.stop_with_fade_out(sound_type, fade_out_frames);
         }

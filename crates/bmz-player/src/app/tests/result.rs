@@ -1,5 +1,70 @@
 use super::*;
 
+#[test]
+fn explicit_result_enter_and_bgm_have_independent_rank_fallbacks() {
+    use crate::system_sound::SoundType::*;
+    for (score, enter, bgm) in [
+        (800, ResultEnterAAA, ResultBgmAAA),
+        (700, ResultEnterAA, ResultBgmAA),
+        (600, ResultEnterA, ResultBgmA),
+    ] {
+        let sounds = |available: &[crate::system_sound::SoundType]| {
+            result_entry_sounds(ClearType::Normal, score, 450, |s| available.contains(&s))
+        };
+        assert_eq!(sounds(&[enter, bgm, ResultClear]), vec![enter, bgm]);
+        assert_eq!(sounds(&[enter, ResultBgmClear]), vec![enter, ResultBgmClear]);
+        assert_eq!(sounds(&[ResultEnterClear, bgm]), vec![ResultEnterClear, bgm]);
+        assert_eq!(sounds(&[enter, ResultClear]), vec![enter]);
+        assert_eq!(sounds(&[ResultBgmClear, ResultClear]), vec![ResultBgmClear]);
+        assert_eq!(sounds(&[ResultClear]), vec![ResultClear]);
+    }
+    assert_eq!(
+        result_entry_sounds(ClearType::Normal, 800, 450, |s| {
+            [ResultEnterAA, ResultBgmAA, ResultEnterClear, ResultBgmClear].contains(&s)
+        }),
+        vec![ResultEnterClear, ResultBgmClear]
+    );
+    assert_eq!(
+        result_entry_sounds(ClearType::Failed, 900, 450, |_| true),
+        vec![ResultEnterFail, ResultBgmFail]
+    );
+}
+
+#[test]
+fn course_entry_keeps_legacy_fallback_and_uses_only_course_bgm() {
+    use crate::system_sound::SoundType::*;
+    for (clear, enter, legacy, bgm, fallback) in [
+        (ClearType::Normal, CourseEnterClear, CourseClear, CourseBgmClear, ResultClear),
+        (ClearType::Failed, CourseEnterFail, CourseFail, CourseBgmFail, ResultFail),
+    ] {
+        let sounds = |available: &[crate::system_sound::SoundType]| {
+            course_result_entry_sounds(clear, |s| available.contains(&s))
+        };
+        assert_eq!(sounds(&[enter, legacy, bgm, fallback]), vec![enter, bgm]);
+        assert_eq!(sounds(&[legacy, bgm]), vec![legacy, bgm]);
+        assert_eq!(sounds(&[fallback, bgm]), vec![fallback, bgm]);
+        assert_eq!(sounds(&[ResultBgmClear, ResultEnterClear]), vec![fallback]);
+    }
+    for enter in crate::system_sound::SoundType::RESULT_ENTERS {
+        assert!(result_exit_system_sounds().contains(&enter));
+    }
+}
+
+#[test]
+fn entry_se_and_course_bgm_use_separate_profile_volumes() {
+    use crate::system_sound::SoundType;
+    let mut mix = ProfileConfig::new_default("default", "Default", 1).audio_mix;
+    mix.master_volume = 50;
+    mix.system_se_volume = 80;
+    mix.system_bgm_volume = 20;
+    for sound in SoundType::RESULT_ENTERS.into_iter().chain([SoundType::SelectEnter]) {
+        assert_eq!(system_sound_volume_from_mix(&mix, sound), 0.4);
+    }
+    for sound in SoundType::RESULT_BGMS.into_iter().chain([SoundType::Select]) {
+        assert_eq!(system_sound_volume_from_mix(&mix, sound), 0.1);
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "creates a Winit event loop; run alone with --ignored"]

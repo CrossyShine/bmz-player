@@ -797,6 +797,80 @@ fn elapsed_ms_u64(started_at: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_enter_and_loop_decode_independently_with_bgm_only_normalization() {
+        let root = test_temp_dir("enter-loop-decode");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("clear.enter.wav"), b"broken").unwrap();
+        std::fs::write(child.join("clear.loop.wav"), b"broken").unwrap();
+        write_test_wav(&root.join("clear.enter.wav"), 5);
+        write_test_wav(&root.join("clear.loop.wav"), 2);
+        write_test_wav(&root.join("course_clear.loop.wav"), 2);
+        let prepared = SystemSoundManager::prepare(
+            &SoundSetSelection {
+                bgm_dir: Some(root.clone()),
+                bgm_variant_dir: Some(child),
+                ..Default::default()
+            },
+            true,
+            48_000,
+            None,
+        );
+        assert_eq!(
+            prepared
+                .samples
+                .iter()
+                .find(|(s, _, _)| *s == SoundType::ResultEnterClear)
+                .unwrap()
+                .2
+                .frames
+                .len(),
+            5
+        );
+        assert!(!prepared.normalization_paths.contains_key(&SoundType::ResultEnterClear));
+        assert_eq!(prepared.normalization_paths.len(), 2);
+        assert!(prepared.looping_sounds.contains(&SoundType::ResultBgmClear));
+        assert!(prepared.looping_sounds.contains(&SoundType::CourseBgmClear));
+        assert!(!prepared.looping_sounds.contains(&SoundType::ResultEnterClear));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn independent_enter_and_bgm_mix_immediately_and_fade_together() {
+        let (engine, mut processor) = test_engine();
+        let se_id = SoundId(SYSTEM_SOUND_BASE);
+        let bgm_id = SoundId(SYSTEM_SOUND_BASE + 1);
+        for (id, frames) in [(se_id, 4), (bgm_id, 2)] {
+            insert_sample(
+                &engine,
+                &mut processor,
+                id,
+                DecodedSample { channels: 1, sample_rate: 48_000, frames: vec![1.0; frames] },
+            );
+        }
+        let manager = SystemSoundManager::with_id_map_and_normalization_gains(
+            engine,
+            HashMap::from([
+                (SoundType::ResultEnterClear, se_id),
+                (SoundType::CourseBgmClear, bgm_id),
+            ]),
+            HashMap::from([(SoundType::CourseBgmClear, 0.5)]),
+            true,
+            true,
+        );
+        manager.play(SoundType::ResultEnterClear, 0.25);
+        manager.play(SoundType::CourseBgmClear, 0.5);
+        assert_eq!(render(&mut processor, 0, 2), vec![0.5; 4]);
+        assert_eq!(render(&mut processor, 2, 2), vec![0.5; 4]);
+        assert_eq!(render(&mut processor, 4, 1), vec![0.25; 2]);
+        manager.play(SoundType::ResultEnterClear, 0.25);
+        manager.stop_with_fade_out(SoundType::ResultEnterClear, 2);
+        manager.stop_with_fade_out(SoundType::CourseBgmClear, 2);
+        let faded = render(&mut processor, 5, 4);
+        assert!(faded[0] > 0.0);
+        assert_eq!(&faded[4..], &[0.0; 4]);
+    }
     use bmz_audio::command::CommandedAudioEngine;
     use bmz_audio::engine::AudioEngine;
     use std::time::{SystemTime, UNIX_EPOCH};
