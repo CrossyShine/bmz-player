@@ -25,3 +25,58 @@ body,
 #__nuxt {
   @apply w-full h-full;
 }
+
+/* manual/ の原稿を表示する本文 */
+.manual-content {
+  @apply leading-7 text-default;
+
+  & h2 {
+    @apply mt-10 mb-4 border-b border-default pb-2 text-2xl font-semibold text-highlighted;
+  }
+  & h3 {
+    @apply mt-8 mb-3 text-lg font-semibold text-highlighted;
+  }
+  & p,
+  & ul,
+  & ol,
+  & table {
+    @apply my-4;
+  }
+  & ul {
+    @apply list-disc pl-6;
+  }
+  & ol {
+    @apply list-decimal pl-6;
+  }
+  & li + li {
+    @apply mt-1;
+  }
+  & li > ul,
+  & li > ol,
+  & li > table,
+  & li > p {
+    @apply my-2;
+  }
+  & a {
+    @apply text-primary underline underline-offset-2 hover:opacity-80;
+  }
+  & strong {
+    @apply font-semibold text-highlighted;
+  }
+  & code {
+    @apply rounded bg-elevated px-1.5 py-0.5 font-mono text-sm;
+  }
+  & td code {
+    @apply whitespace-nowrap;
+  }
+  & table {
+    @apply block w-full overflow-x-auto border-collapse text-sm;
+  }
+  & th,
+  & td {
+    @apply border border-default px-3 py-2 text-left align-top;
+  }
+  & th {
+    @apply bg-elevated font-semibold text-highlighted;
+  }
+}

@@ -30,6 +30,7 @@ export default defineI18nLocale(() =>
         logout: '로그아웃',
         login: '로그인',
         register: '가입',
+        manual: '매뉴얼',
       },
       home: {
         title: 'BMZ IR',
@@ -83,6 +84,14 @@ export default defineI18nLocale(() =>
         remembered: '비밀번호가 생각났나요?',
         unsupported:
           '이메일 비밀번호 재설정은 아직 지원하지 않습니다. 로그인 후 계정 설정에서 변경하세요.',
+      },
+      manual: {
+        title: '매뉴얼',
+        description: 'BMZ Player 시작 방법, 조작 방법, 문제 해결 방법을 정리했습니다.',
+        contents: '목차',
+        englishOnly: '매뉴얼은 현재 일본어와 영어로만 제공되며, 영어판을 표시합니다.',
+        previous: '이전: {title}',
+        next: '다음: {title}',
       },
       licenses: {
         title: 'Web 의존성 라이선스',

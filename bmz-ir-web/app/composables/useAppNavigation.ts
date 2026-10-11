@@ -25,6 +25,7 @@ export function useAppNavigation() {
     { label: t('nav.charts'), icon: 'i-lucide-list-music', to: localePath('/charts') },
     { label: t('nav.courses'), icon: 'i-lucide-medal', to: localePath('/courses') },
     { label: t('nav.players'), icon: 'i-lucide-users', to: localePath('/players') },
+    { label: t('nav.manual'), icon: 'i-lucide-book-open', to: localePath('/manual') },
   ])
 
   const accountItems = computed<NavigationMenuItem[]>(() =>

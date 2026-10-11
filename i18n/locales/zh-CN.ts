@@ -28,6 +28,7 @@ export default defineI18nLocale(() =>
         logout: '退出登录',
         login: '登录',
         register: '注册',
+        manual: '使用手册',
       },
       home: {
         title: 'BMZ IR',
@@ -80,6 +81,14 @@ export default defineI18nLocale(() =>
         submit: '发送重置邮件',
         remembered: '想起密码了？',
         unsupported: '暂不支持通过邮件重置密码。请登录后在账户设置中修改。',
+      },
+      manual: {
+        title: '使用手册',
+        description: '介绍 BMZ Player 的入门方法、操作方式以及常见问题的解决办法。',
+        contents: '目录',
+        englishOnly: '使用手册目前仅提供日语和英语版本，此处显示英语版。',
+        previous: '上一页：{title}',
+        next: '下一页：{title}',
       },
       licenses: {
         title: 'Web 依赖项许可证',

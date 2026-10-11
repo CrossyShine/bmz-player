@@ -31,6 +31,7 @@ export default defineI18nLocale(() =>
         logout: 'Log out',
         login: 'Log in',
         register: 'Register',
+        manual: 'Manual',
       },
       home: {
         title: 'BMZ IR',
@@ -85,6 +86,16 @@ export default defineI18nLocale(() =>
         remembered: 'Remembered your password?',
         unsupported:
           'Password reset by email is not supported yet. Change it from Account settings while logged in.',
+      },
+      manual: {
+        title: 'Manual',
+        description:
+          'How to get started with BMZ Player, how to play, and what to do when something goes wrong.',
+        contents: 'Contents',
+        englishOnly:
+          'The manual is available in Japanese and English. The English version is shown.',
+        previous: 'Previous: {title}',
+        next: 'Next: {title}',
       },
       licenses: {
         title: 'Web Dependency Licenses',
