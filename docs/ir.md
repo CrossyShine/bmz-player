@@ -94,8 +94,11 @@ SHA-256 fallback でラベルを付与する。
   submission にしかなかった remote ID / 紐付けは復元できない。
 - local backfill: `bmz ir upload-local [--dry-run] [--limit N] [--sync] [--all]` で
   `score.db` の既存 `score_history` を `local_backfill` source の score submit として enqueue
-  する。既送信履歴と既に queue にある履歴は既定でスキップし、course stage /
-  autoplay は既定で除外。local backfill は未登録 chart を作成できるが、既存 chart
+  する。既送信履歴と既に queue にある履歴は既定でスキップする。`download-scores` で
+  同じ provider/account から取得済みのscoreも、IR上に既存scoreがあるため候補から除外し、
+  `--resend`でも再投入しない。別providerまたは別accountへの送信は引き続き候補になる。
+  downloaded source marker はBMZ IR / BMS-IR共通の `bmz_ir` で、providerとaccountも照合する。
+  course stage / autoplay は既定で除外。local backfill は未登録 chart を作成できるが、既存 chart
   の正規メタデータは上書きしない。`--sync` で既存の未完了score jobがある場合は、
   queueを増やさず先に最大100件を同期する。投入 batch の既定値は200件。
   `--all` は `--sync` を含む完走モードで、既存queueの排出と次の投入batchを候補が

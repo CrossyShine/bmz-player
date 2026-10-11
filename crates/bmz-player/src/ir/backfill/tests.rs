@@ -1,3 +1,12 @@
+use crate::config::profile_config::{IrConfig, IrProviderConfig};
+use crate::ir::download::{IR_SCORE_DOWNLOAD_SOURCE, import_ir_score_entries};
+use crate::ir::types::{IrJudgePayload, IrJudgeSidePayload, IrOwnScoreHistoryEntry};
+use crate::storage::library_db::{ChartImportRecord, LibraryDatabase};
+use crate::storage::migration::{LIBRARY_MIGRATIONS, SCORE_MIGRATIONS};
+use crate::storage::score_db::ScoreDatabase;
+use bmz_chart::hash::compute_chart_identity;
+use bmz_chart::model::{ChartMetadata, PlayableChart};
+use bmz_core::time::TimeUs;
 use rusqlite::Connection;
 
 use super::*;
@@ -10,6 +19,99 @@ fn test_network_db() -> NetworkDatabase {
     configure_connection(&connection).unwrap();
     run_migrations(&mut connection, NETWORK_MIGRATIONS).unwrap();
     NetworkDatabase::from_connection(connection)
+}
+
+fn test_score_db() -> ScoreDatabase {
+    let mut connection = Connection::open_in_memory().unwrap();
+    configure_connection(&connection).unwrap();
+    run_migrations(&mut connection, SCORE_MIGRATIONS).unwrap();
+    ScoreDatabase::from_connection(connection)
+}
+
+fn test_library_db() -> LibraryDatabase {
+    let mut connection = Connection::open_in_memory().unwrap();
+    configure_connection(&connection).unwrap();
+    run_migrations(&mut connection, LIBRARY_MIGRATIONS).unwrap();
+    LibraryDatabase::from_connection(connection)
+}
+
+fn test_playable_chart(title: &str) -> PlayableChart {
+    PlayableChart {
+        identity: compute_chart_identity(title.as_bytes()),
+        metadata: ChartMetadata { title: title.to_string(), ..Default::default() },
+        lane_notes: std::array::from_fn(|_| Vec::new()),
+        long_notes: Vec::new(),
+        bgm_events: Vec::new(),
+        bga_events: Vec::new(),
+        timing_events: Vec::new(),
+        scroll_events: Vec::new(),
+        speed_events: Vec::new(),
+        judge_rank_events: Vec::new(),
+        bgm_volume_events: Vec::new(),
+        key_volume_events: Vec::new(),
+        text_events: Vec::new(),
+        bga_opacity_events: Vec::new(),
+        bga_argb_events: Vec::new(),
+        swbga_definitions: Vec::new(),
+        bga_keybound_events: Vec::new(),
+        bga_asset_by_bmp_key: Default::default(),
+        bar_lines: Vec::new(),
+        sounds: Vec::new(),
+        bga_assets: Vec::new(),
+        total_notes: 12,
+        end_time: TimeUs(10_000_000),
+    }
+}
+
+fn imported_score_entry(chart_sha256: [u8; 32]) -> IrOwnScoreHistoryEntry {
+    IrOwnScoreHistoryEntry {
+        score_id: "remote-score".to_string(),
+        chart_sha256: crate::storage::common::hash_to_hex(&chart_sha256),
+        clear: "Hard".to_string(),
+        ex_score: 21,
+        max_combo: 12,
+        min_bp: 1,
+        min_cb: 1,
+        bp: 1,
+        cb: 1,
+        gauge: "HARD".to_string(),
+        ln_policy: "ForceLn".to_string(),
+        double_option: "off".to_string(),
+        applied_double_option: "off".to_string(),
+        source_kind: "beatoraja".to_string(),
+        rule_mode: "Beatoraja".to_string(),
+        judges: IrJudgePayload {
+            fast: IrJudgeSidePayload {
+                pgreat: 10,
+                great: 1,
+                good: 0,
+                bad: 0,
+                poor: 0,
+                empty_poor: 0,
+            },
+            slow: IrJudgeSidePayload {
+                pgreat: 0,
+                great: 0,
+                good: 0,
+                bad: 1,
+                poor: 0,
+                empty_poor: 0,
+            },
+        },
+        notes: 12,
+        pass_notes: 12,
+        duration_ms: Some(10_000),
+        device_type: "controller".to_string(),
+        arrange_1p: None,
+        arrange_2p: None,
+        random_seed: None,
+        seed_scheme: String::new(),
+        assist_mask: Some(0),
+        played_at: Some(1_700_000_000),
+        server_received_at: 1_700_000_001,
+        verification: "unverified".to_string(),
+        replay_hash: None,
+    }
 }
 
 #[test]
@@ -250,4 +352,119 @@ fn existing_queue_is_distinct_from_successful_submission() {
         existing_score_state(&network_db, &target, 42).unwrap(),
         ExistingScoreState::Submitted
     );
+}
+
+#[test]
+fn downloaded_scores_are_skipped_only_for_their_source_account_even_with_resend() {
+    let mut score_db = test_score_db();
+    let network_db = test_network_db();
+    let mut library_db = test_library_db();
+    let chart = test_playable_chart("downloaded-score-upload-filter");
+    let chart_sha256 = chart.identity.file_sha256;
+    library_db
+        .upsert_chart_import(&ChartImportRecord {
+            root_id: None,
+            file_path: std::path::Path::new("/fixture/song.bms"),
+            file_size: 1,
+            modified_at: 1,
+            scanned_at: 1,
+            chart: &chart,
+        })
+        .unwrap();
+
+    let mut imported = crate::ir::download::IrScoreDownloadReport::default();
+    import_ir_score_entries(
+        &mut score_db,
+        &network_db,
+        "bmz",
+        "account-a",
+        &[imported_score_entry(chart_sha256)],
+        false,
+        1_800_000_000,
+        &mut imported,
+    )
+    .unwrap();
+    assert_eq!(imported.imported, 1);
+    let stored_source: (String, String, String) = score_db
+        .conn()
+        .query_row("SELECT source, provider, account_id FROM score_history_sources", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap();
+    assert_eq!(stored_source, (IR_SCORE_DOWNLOAD_SOURCE.into(), "bmz".into(), "account-a".into()));
+
+    let mut bmz = IrProviderConfig::bmz_ir();
+    bmz.provider_key = "bmz".to_string();
+    bmz.enabled = true;
+    bmz.account_id = "account-a".to_string();
+    let mut other = IrProviderConfig::custom();
+    other.provider = "other".to_string();
+    other.provider_key = "other".to_string();
+    other.base_url = "https://ir.example.invalid".to_string();
+    other.enabled = true;
+    other.account_id = "other-account".to_string();
+    let mut ir_config = IrConfig {
+        primary_provider: "bmz".to_string(),
+        providers: vec![bmz, other],
+        ..IrConfig::default()
+    };
+
+    let same_account = IrLocalUploadOptions {
+        provider: Some("bmz".to_string()),
+        dry_run: true,
+        ..IrLocalUploadOptions::default()
+    };
+    let dry_run = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut test_network_db(),
+        &same_account,
+        1_800_000_001,
+    )
+    .unwrap();
+    assert_eq!(dry_run.candidates, 0);
+    assert_eq!(dry_run.skipped_already_submitted, 1);
+
+    let resend = IrLocalUploadOptions { dry_run: false, resend: true, ..same_account.clone() };
+    let mut network_db = test_network_db();
+    let resent = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut network_db,
+        &resend,
+        1_800_000_002,
+    )
+    .unwrap();
+    assert_eq!(resent.candidates, 0);
+    assert_eq!(resent.enqueued, 0);
+    assert_eq!(resent.skipped_already_submitted, 1);
+
+    ir_config.providers[0].account_id = "account-b".to_string();
+    let other_account = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut network_db,
+        &IrLocalUploadOptions { provider: Some("bmz".to_string()), ..Default::default() },
+        1_800_000_003,
+    )
+    .unwrap();
+    assert_eq!(other_account.enqueued, 1);
+
+    let other_provider = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut network_db,
+        &IrLocalUploadOptions { provider: Some("other".to_string()), ..Default::default() },
+        1_800_000_004,
+    )
+    .unwrap();
+    assert_eq!(other_provider.enqueued, 1);
 }

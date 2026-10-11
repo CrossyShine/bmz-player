@@ -16,6 +16,7 @@ use crate::storage::library_db::{ChartAnalysis, ChartListItem, LibraryDatabase};
 use crate::storage::network_db::{IrJobKind, NetworkDatabase, NewIrScoreJob};
 use crate::storage::score_db::{ScoreDatabase, ScoreSourceKind};
 
+use super::download::IR_SCORE_DOWNLOAD_SOURCE;
 use super::types::{
     IrChartBpm, IrChartFeatures, IrChartLnProfile, IrChartNotes, IrChartPayload, IrClientInfo,
     IrEffectiveLnMode, IrJudgePayload, IrJudgeSidePayload, IrReplayPayload, IrResultPayload,
@@ -109,6 +110,10 @@ pub fn enqueue_local_score_jobs(
             report.skipped_autoplay += 1;
             continue;
         }
+        if has_score_from_target_ir_source(score_db, &target, row.id)? {
+            report.skipped_already_submitted += 1;
+            continue;
+        }
         if !options.resend {
             match existing_score_state(network_db, &target, row.id).with_context(|| {
                 format!("failed to check IR submission state for score {}", row.id)
@@ -171,6 +176,30 @@ pub fn enqueue_local_score_jobs(
     }
 
     Ok(report)
+}
+
+fn has_score_from_target_ir_source(
+    score_db: &ScoreDatabase,
+    target: &TargetProvider,
+    local_score_id: i64,
+) -> Result<bool> {
+    let exists: bool = score_db.conn().query_row(
+        "SELECT EXISTS (
+            SELECT 1 FROM score_history_sources
+            WHERE score_history_id = ?1
+              AND source = ?2
+              AND provider = ?3
+              AND account_id = ?4
+        )",
+        rusqlite::params![
+            local_score_id,
+            IR_SCORE_DOWNLOAD_SOURCE,
+            target.provider_key,
+            target.account_id,
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
 }
 
 #[derive(Debug, Clone)]
