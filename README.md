@@ -39,6 +39,13 @@ Features
 > [!CAUTION]
 > Don't use this application to play non-permitted copyrighted contents.
 
+## Manual
+
+使い方・初期セットアップ・困ったときの対処は [マニュアル](https://bmz-player.hyrorre.workers.dev/manual) を参照してください。
+ゲーム内では F1 →「マニュアルを開く（ブラウザ）」から開けます。原稿は [manual/](manual/README.md) にあります。
+
+See the [manual](https://bmz-player.hyrorre.workers.dev/en/manual) for setup, controls, and troubleshooting.
+
 ## Linux downloads
 
 Download `bmz-player-v<version>-linux-x64.tar.gz` from

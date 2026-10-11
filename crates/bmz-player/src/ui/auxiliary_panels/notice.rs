@@ -69,6 +69,15 @@ pub(super) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// BMZ IR で公開しているマニュアルの URL。原稿のない言語でも、IR 側が英語版を表示する。
+pub(super) fn manual_url(locale: AppLocale) -> String {
+    let base = crate::ir::bmz_official::BMZ_IR_DEFAULT_BASE_URL.trim_end_matches('/');
+    match locale {
+        AppLocale::Ja => format!("{base}/manual"),
+        other => format!("{base}/{}/manual", other.code()),
+    }
+}
+
 pub(super) fn directory_open_targets(app_paths: &AppPaths) -> [DirectoryOpenTarget<'_>; 4] {
     [
         DirectoryOpenTarget { label: "resource_dir", path: &app_paths.resource_dir },

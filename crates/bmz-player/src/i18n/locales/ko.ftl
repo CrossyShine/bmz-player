@@ -157,6 +157,8 @@ common-unspecified = (지정 안 함)
 
 menu-title = BMZ 메뉴
 menu-toggle-help = F1 키로 이 메뉴를 열거나 닫습니다.
+menu-open-manual = 매뉴얼 열기 (브라우저)
+menu-manual-open-failed = 매뉴얼을 열 수 없습니다: { $error }
 menu-debug = 디버그 정보
 menu-random-trainer = Random Trainer
 menu-app-settings = 애플리케이션 설정

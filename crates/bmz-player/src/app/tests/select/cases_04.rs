@@ -329,12 +329,18 @@ fn select_snapshot_rows_append_values_only_to_config_bar_text() {
     assert_eq!(config.title, "MASTER");
     assert_eq!(config.display_bar_text(), "MASTER [37]");
     assert_eq!(config.artist, "37");
-    assert_eq!(config.subtitle, "ゲーム全体の音量を調整します。");
+    assert_eq!(
+        config.subtitle,
+        crate::i18n::text(crate::i18n::AppLocale::Ja, "settings-entry-description-master-volume")
+    );
     assert_eq!(config.play_level, "37");
     assert_eq!(binding.title, "E1 (KEYBOARD)");
     assert_eq!(binding.display_bar_text(), "E1 (KEYBOARD) [Q]");
     assert_eq!(binding.artist, "Q");
-    assert_eq!(binding.subtitle, "操作またはレーンに使用する入力を割り当てます。");
+    assert_eq!(
+        binding.subtitle,
+        crate::i18n::text(crate::i18n::AppLocale::Ja, "settings-key-binding-description")
+    );
     assert_eq!(binding.play_level, "Q");
 
     profile.audio_mix.master_volume = 38;
@@ -374,11 +380,14 @@ fn select_snapshot_rows_formats_app_config_values_and_audio_apply_action() {
     assert_eq!(backend.title, "AUDIO BACKEND");
     assert_eq!(backend.display_bar_text(), "AUDIO BACKEND [WASAPI]");
     assert_eq!(backend.artist, "WASAPI");
-    assert_eq!(backend.subtitle, "音声出力に使用するOS・ドライバのバックエンドを選びます。");
+    assert_eq!(
+        backend.subtitle,
+        crate::i18n::text(crate::i18n::AppLocale::Ja, "settings-entry-description-audio-backend")
+    );
     assert_eq!(apply.title, "適用 (音声出力を開き直す)");
     assert_eq!(
         apply.subtitle,
-        "「適用」で設定を保存し音声出力を再構築します。演奏中は選曲画面に戻ったときに適用します。"
+        crate::i18n::text(crate::i18n::AppLocale::Ja, "settings-audio-apply-help")
     );
 }
 

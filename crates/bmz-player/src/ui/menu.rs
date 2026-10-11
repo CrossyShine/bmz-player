@@ -21,6 +21,7 @@ pub(super) fn build_menu(
         .default_pos(egui::pos2(16.0, 16.0))
         .show(ctx, |ui| {
             ui.label(tr!(text, "menu-toggle-help"));
+            build_manual_button(ui, text);
             ui.separator();
             ui.checkbox(panels.settings, tr!(text, "settings-workspace-title"));
             ui.checkbox(panels.course_editor, tr!(text, "menu-course-editor"));
@@ -64,6 +65,26 @@ pub(super) fn build_menu(
                 }
             }
         });
+}
+
+fn build_manual_button(ui: &mut egui::Ui, text: Localizer) {
+    let error_id = egui::Id::new("bmz_menu_manual_open_error");
+    let url = manual_url(text.locale());
+    if ui.button(tr!(text, "menu-open-manual")).on_hover_text(&url).clicked() {
+        let error = crate::song_download::open_browser_urls(std::slice::from_ref(&url))
+            .err()
+            .map(|error| format!("{error:#}"));
+        if let Some(error) = &error {
+            tracing::warn!(%error, "failed to open manual");
+        }
+        ui.data_mut(|data| data.insert_temp(error_id, error));
+    }
+    if let Some(error) = ui.data(|data| data.get_temp::<Option<String>>(error_id)).flatten() {
+        ui.colored_label(
+            egui::Color32::LIGHT_RED,
+            tr!(text, "menu-manual-open-failed", "error" => error),
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

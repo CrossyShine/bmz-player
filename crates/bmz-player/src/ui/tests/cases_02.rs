@@ -175,6 +175,13 @@ fn directory_open_targets_expose_only_app_path_roots() {
 }
 
 #[test]
+fn manual_url_uses_ir_locale_prefix_except_japanese() {
+    assert_eq!(manual_url(AppLocale::Ja), "https://bmz-player.hyrorre.workers.dev/manual");
+    assert_eq!(manual_url(AppLocale::En), "https://bmz-player.hyrorre.workers.dev/en/manual");
+    assert_eq!(manual_url(AppLocale::ZhTw), "https://bmz-player.hyrorre.workers.dev/zh-TW/manual");
+}
+
+#[test]
 fn combined_license_notice_uses_packaged_notice_files() {
     let root = unique_test_dir("bmz-ui-license-packaged");
     let resource_dir = root.join("resources");

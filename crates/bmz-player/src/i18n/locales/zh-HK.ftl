@@ -158,6 +158,8 @@ common-unspecified = （未指定）
 
 menu-title = BMZ 選單
 menu-toggle-help = 按 F1 開啟或關閉此選單。
+menu-open-manual = 開啟使用手冊（瀏覽器）
+menu-manual-open-failed = 無法開啟使用手冊：{ $error }
 menu-debug = 偵錯資訊
 menu-random-trainer = Random Trainer
 menu-app-settings = 程式設定
