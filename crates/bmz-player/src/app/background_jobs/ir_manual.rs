@@ -1,5 +1,5 @@
 use super::*;
-use crate::ir::manual_job::{IrManualEnv, IrManualOp, IrManualOutcome, IrManualOutcomeStatus};
+use crate::ir::manual_job::{IrManualEnv, outcome_message};
 
 impl WinitApp {
     fn ir_manual_env(&self) -> IrManualEnv {
@@ -20,47 +20,9 @@ impl WinitApp {
         }
         if let Some(outcome) = self.jobs.ir_manual.take_notice() {
             let message =
-                ir_manual_notice(Localizer::new(self.boot.profile_config.ui.locale()), &outcome);
+                outcome_message(Localizer::new(self.boot.profile_config.ui.locale()), &outcome);
             tracing::info!(op = ?outcome.op, status = ?outcome.status, "manual IR operation finished");
             self.show_left_overlay_toast(message);
-        }
-    }
-}
-
-pub(super) fn ir_manual_notice(text: Localizer, outcome: &IrManualOutcome) -> String {
-    let progress = &outcome.progress;
-    let resend =
-        matches!(outcome.op, IrManualOp::ResendJob { .. } | IrManualOp::ResendFailed { .. });
-    let mut args = FluentArgs::new();
-    match &outcome.status {
-        IrManualOutcomeStatus::Cancelled => text.text("toast-ir-manual-cancelled"),
-        IrManualOutcomeStatus::Error(error) => {
-            args.set("error", error.clone());
-            text.format("toast-ir-manual-error", &args)
-        }
-        IrManualOutcomeStatus::WaitingTimedOut => text.text("toast-ir-manual-waiting-timeout"),
-        IrManualOutcomeStatus::FailedJobs { failed } if !resend => {
-            args.set("failed", i64::from(*failed));
-            text.format("toast-ir-manual-failed-jobs", &args)
-        }
-        IrManualOutcomeStatus::Completed | IrManualOutcomeStatus::FailedJobs { .. } => {
-            match outcome.op {
-                IrManualOp::UploadLocalAll => {
-                    args.set("submitted", i64::from(progress.submitted));
-                    args.set("failed", i64::from(progress.failed));
-                    text.format("toast-ir-upload-completed", &args)
-                }
-                IrManualOp::DownloadScores => {
-                    args.set("imported", i64::from(progress.download_imported));
-                    args.set("linked", i64::from(progress.download_linked));
-                    text.format("toast-ir-download-completed", &args)
-                }
-                IrManualOp::ResendJob { .. } | IrManualOp::ResendFailed { .. } => {
-                    args.set("submitted", i64::from(progress.submitted));
-                    args.set("failed", i64::from(progress.failed));
-                    text.format("toast-ir-resend-completed", &args)
-                }
-            }
         }
     }
 }

@@ -12,6 +12,7 @@ pub(in crate::ui) struct ProfileSettingsPanelContext<'a> {
     pub(in crate::ui) show_fps: &'a mut bool,
     pub(in crate::ui) ir_login: &'a mut IrLoginUiState,
     pub(in crate::ui) ir_device_key: &'a mut IrDeviceKeyUiState,
+    pub(in crate::ui) ir_manual: &'a mut IrManualUi,
     pub(in crate::ui) profile_manager: &'a mut ProfileManagerUiState,
     pub(in crate::ui) key_config: &'a mut EguiKeyConfigUiState,
     pub(in crate::ui) profile_root: &'a std::path::Path,

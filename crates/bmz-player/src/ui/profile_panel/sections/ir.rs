@@ -9,6 +9,7 @@ pub(in crate::ui::profile_panel) fn build_profile_ir_section(
     let text = section.text;
     let ir_login = &mut *section.ir_login;
     let ir_device_key = &mut *section.ir_device_key;
+    let ir_manual = &mut *section.ir_manual;
     let profile_root = section.profile_root;
     SettingsSection::new(SettingsPage::Ir, tr!(text, "profile-ir-title"))
         .scope(tr!(text, "settings-scope-profile"))
@@ -378,5 +379,6 @@ pub(in crate::ui::profile_panel) fn build_profile_ir_section(
             if ui.button(tr!(text, "profile-ir-add-provider")).clicked() {
                 profile.ir.providers.push(IrProviderConfig::custom());
             }
+            build_ir_bulk_operations(ui, &profile.ir, ir_manual, text);
         });
 }

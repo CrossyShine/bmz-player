@@ -11,7 +11,12 @@ pub(super) struct AudioDevicePickerState {
 
 impl EguiLayer {
     /// `show_fps` は右上 FPS オーバーレイの初期表示状態。
-    pub fn new(window: &Window, show_fps: bool, font_search_paths: Vec<PathBuf>) -> Self {
+    pub fn new(
+        window: &Window,
+        show_fps: bool,
+        font_search_paths: Vec<PathBuf>,
+        ir_manual: crate::ir::manual_job::IrManualHandle,
+    ) -> Self {
         let ctx = egui::Context::default();
         // 倍率はプロファイル設定で管理し、egui 標準ショートカットとの競合を避ける。
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
@@ -62,6 +67,7 @@ impl EguiLayer {
             obs_scene_picker: ObsScenePickerState::default(),
             ir_login: IrLoginUiState::default(),
             ir_device_key: IrDeviceKeyUiState::default(),
+            ir_manual: IrManualUi::new(ir_manual),
             profile_manager: ProfileManagerUiState::default(),
             directory_open_status: None,
         }
@@ -385,6 +391,7 @@ impl EguiLayer {
                             show_fps,
                             ir_login,
                             ir_device_key: &mut self.ir_device_key,
+                            ir_manual: &mut self.ir_manual,
                             profile_manager: &mut self.profile_manager,
                             key_config: &mut self.key_config,
                             profile_root,
@@ -460,6 +467,11 @@ impl EguiLayer {
                     );
                     obs_enabled_changed |= before_obs != serde_json::to_value(&app_config.obs).ok();
                 });
+                // Decide / Play 中は IR 設定と同様に、一括操作・再送信を開かない。
+                if settings_editable {
+                    build_ir_queue_window(ctx, &profile_config.ir, &mut self.ir_manual, text);
+                    build_ir_confirm_modal(ctx, &profile_config.ir, &mut self.ir_manual, text);
+                }
                 if !*show_settings || !SettingsNavigation::load(ctx).accepts_key_capture() {
                     self.key_config.listening = None;
                 }

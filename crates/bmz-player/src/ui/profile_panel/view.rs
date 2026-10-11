@@ -11,6 +11,7 @@ pub(in crate::ui) fn build_profile_settings_panel(
         show_fps,
         ir_login,
         ir_device_key,
+        ir_manual,
         profile_manager,
         key_config,
         profile_root,
@@ -32,6 +33,7 @@ pub(in crate::ui) fn build_profile_settings_panel(
         show_fps,
         ir_login,
         ir_device_key,
+        ir_manual,
         profile_manager,
         key_config,
         profile_root,
@@ -97,6 +99,7 @@ mod tests {
         let mut show_fps = false;
         let mut ir_login = IrLoginUiState::default();
         let mut ir_device_key = IrDeviceKeyUiState::default();
+        let mut ir_manual = IrManualUi::new(Default::default());
         let mut profile_manager = ProfileManagerUiState::default();
         let mut key_config = EguiKeyConfigUiState::default();
         let data = crate::bootstrap::profile_tests::ProfileTestDir::new();
@@ -111,6 +114,7 @@ mod tests {
                         show_fps: &mut show_fps,
                         ir_login: &mut ir_login,
                         ir_device_key: &mut ir_device_key,
+                        ir_manual: &mut ir_manual,
                         profile_manager: &mut profile_manager,
                         key_config: &mut key_config,
                         profile_root: std::path::Path::new("."),

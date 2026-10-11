@@ -108,12 +108,14 @@ use settings_panel::*;
 use skin_panel::*;
 
 mod fonts;
+mod ir_manual_ui;
 mod ir_state;
 mod menu;
 mod model;
 mod profile_runtime;
 mod runtime;
 
+use ir_manual_ui::*;
 use ir_state::*;
 use menu::*;
 use model::*;

@@ -22,6 +22,7 @@ pub(super) struct ProfileSectionContext<'a> {
     pub(super) show_fps: &'a mut bool,
     pub(super) ir_login: &'a mut IrLoginUiState,
     pub(super) ir_device_key: &'a mut IrDeviceKeyUiState,
+    pub(super) ir_manual: &'a mut IrManualUi,
     pub(super) profile_manager: &'a mut ProfileManagerUiState,
     pub(super) key_config: &'a mut EguiKeyConfigUiState,
     pub(super) profile_root: &'a std::path::Path,

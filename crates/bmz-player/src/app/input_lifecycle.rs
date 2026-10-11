@@ -504,6 +504,7 @@ impl WinitApp {
                     &window,
                     self.boot.profile_config.ui.show_fps,
                     vec![self.boot.app_paths.bundled_noto_cjk_font_root()],
+                    self.jobs.ir_manual.clone(),
                 ));
                 self.window = Some(window);
                 self.refresh_skin_screen_size();

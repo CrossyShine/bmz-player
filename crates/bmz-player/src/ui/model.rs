@@ -445,6 +445,8 @@ pub struct EguiLayer {
     pub(super) ir_login: IrLoginUiState,
     /// プロファイル設定パネル: IR device key 操作用の状態。
     pub(super) ir_device_key: IrDeviceKeyUiState,
+    /// プロファイル設定パネル: IR一括操作と送信キュー画面の状態。
+    pub(super) ir_manual: IrManualUi,
     /// プロファイル設定パネル: profile 作成 / 複製フォームの状態。
     pub(super) profile_manager: ProfileManagerUiState,
     /// BMZ メニュー: OS のファイルマネージャでディレクトリを開いた直近結果。

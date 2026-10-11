@@ -19,6 +19,7 @@ impl EguiLayer {
     pub(crate) fn reset_for_profile(&mut self, profile: &ProfileConfig) {
         self.ir_login = IrLoginUiState::default();
         self.ir_device_key = IrDeviceKeyUiState::default();
+        self.ir_manual.reset();
         self.key_config = EguiKeyConfigUiState::default();
         self.skin_ui_path_cache = SkinUiPathCache::default();
         self.profile_manager.selected_id = profile.id.clone();

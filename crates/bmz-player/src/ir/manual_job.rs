@@ -18,6 +18,7 @@ use anyhow::Result;
 use tokio::sync::watch;
 
 use crate::config::profile_config::IrConfig;
+use crate::i18n::Localizer;
 use crate::ir::backfill::{IrLocalUploadOptions, enqueue_local_score_jobs};
 use crate::ir::download::{IrScoreDownloadOptions, IrScoreDownloadReport};
 use crate::ir::manual::{
@@ -850,6 +851,47 @@ fn load_queue(env: &IrManualEnv, query: &IrQueueQuery) -> Result<IrQueueView> {
         })
         .collect();
     Ok(IrQueueView { query: query.clone(), counts, total, rows })
+}
+
+/// toast・設定画面の結果表示に使う、操作結果の1行説明。
+pub fn outcome_message(text: Localizer, outcome: &IrManualOutcome) -> String {
+    use crate::i18n::FluentArgs;
+
+    let progress = &outcome.progress;
+    let resend =
+        matches!(outcome.op, IrManualOp::ResendJob { .. } | IrManualOp::ResendFailed { .. });
+    let mut args = FluentArgs::new();
+    match &outcome.status {
+        IrManualOutcomeStatus::Cancelled => text.text("toast-ir-manual-cancelled"),
+        IrManualOutcomeStatus::Error(error) => {
+            args.set("error", error.clone());
+            text.format("toast-ir-manual-error", &args)
+        }
+        IrManualOutcomeStatus::WaitingTimedOut => text.text("toast-ir-manual-waiting-timeout"),
+        IrManualOutcomeStatus::FailedJobs { failed } if !resend => {
+            args.set("failed", i64::from(*failed));
+            text.format("toast-ir-manual-failed-jobs", &args)
+        }
+        IrManualOutcomeStatus::Completed | IrManualOutcomeStatus::FailedJobs { .. } => {
+            match outcome.op {
+                IrManualOp::UploadLocalAll => {
+                    args.set("submitted", i64::from(progress.submitted));
+                    args.set("failed", i64::from(progress.failed));
+                    text.format("toast-ir-upload-completed", &args)
+                }
+                IrManualOp::DownloadScores => {
+                    args.set("imported", i64::from(progress.download_imported));
+                    args.set("linked", i64::from(progress.download_linked));
+                    text.format("toast-ir-download-completed", &args)
+                }
+                IrManualOp::ResendJob { .. } | IrManualOp::ResendFailed { .. } => {
+                    args.set("submitted", i64::from(progress.submitted));
+                    args.set("failed", i64::from(progress.failed));
+                    text.format("toast-ir-resend-completed", &args)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
