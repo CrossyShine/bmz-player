@@ -93,9 +93,12 @@ FAILEDをランクより優先します。ランク判定はResult表示と同�
 ランク音源はBGM・SEとも完全一致で選び、例えばAAAで`aaa`がなければ`clear`へ戻し、`aa`や`a`には落としません。
 ノーツ数0ではランク音源を使わず、`clear`へ戻します。
 ランク別SEより汎用の`clear` BGMを優先します。AAAならサウンドセットの`aaa`、同セットの`clear`、
-補完用SEの`aaa`、補完用SEの`clear`の順です。各SEはSEセット、既定音源の順で補完します。
+同ランクの互換SE、`clear`互換SEの順です。各SEは子、親、SEセット、既定音源の順で補完します。
 バリエーション利用時もランクを先に判定し、AAAなら子の`aaa`、親の`aaa`、子の`clear`、親の`clear`、
 同ランクSE、`clear` SEの順です。親に`aaa`がある場合は子の汎用`clear`より優先します。
+互換SEの`clear` / `fail` / `a` / `aa` / `aaa`も子、親、補完用SEセット、既定音源の順で
+通常名を探索します。`.loop`は互換SEの候補に含めません。
+同じ通常名ファイルがBGMとSEの両方へ登録されても、通常RESULTではBGM優先で1つだけ再生します。
 
 BGMが選ばれた場合、従来のclear / fail SEは同時に鳴らしません。BGMの音量が0でもSEへ戻しません。
 単発BGMの終了後にclear / fail SEを追加再生することもありません。
@@ -148,6 +151,9 @@ FAILEDは`fail.enter`と`fail.loop` → `fail`を使います。
 
 COURSE RESULTのSEは`course_clear.enter` / `course_fail.enter`を優先し、なければ
 従来の`course_clear` / `course_fail`、さらに従来のRESULT `clear` / `fail` SEへ戻ります。
+各音種は子、親、補完用SEセット、既定音源の順で、欠落・デコード失敗時は次候補を使います。
+RESULT互換SEへの補完ではサウンドセットの通常名`clear` / `fail`を補完用SEセットより優先し、
+単発・システムSE音量で再生します。`clear.loop` / `fail.loop`はこの補完に使いません。
 SEは1つだけ鳴らし、専用`.loop` BGMがあれば同時に開始します。
 通常RESULTの`clear.loop`等をCOURSE RESULTへ流用しません。
 
@@ -164,7 +170,7 @@ Select復帰・リトライ・コース遷移・profile切替でRESULT BGMを持
 
 ## SEの上書きと補完
 
-RESULT入口音（`clear` / `fail` / `a` / `aa` / `aaa`）以外のシステムSEは次の順で探索します。
+互換RESULT SE（`clear` / `fail` / `a` / `aa` / `aaa`）を含むシステムSEは次の順で探索します。
 
 1. 選択中の子フォルダ内の同名音源（子がある場合）
 2. 選択中サウンドセットのルートにある同名音源（共通音源）
@@ -173,7 +179,8 @@ RESULT入口音（`clear` / `fail` / `a` / `aa` / `aaa`）以外のシステムS
 
 例えばサウンドセット内の`scratch.ogg`を、補完用SEセットのスクラッチ音より優先して再生します。
 これらの音源は単発再生とシステムSE音量を維持します。
-RESULT入口音もサウンドセットから置き換えられますが、RESULT BGMとしてシステムBGM音量を使います。
+RESULT入口音の通常名は通常RESULTのBGMとしてシステムBGM音量を使います。
+COURSE RESULTの互換SE補完として使う場合は、同じ通常名でも単発・システムSE音量です。
 同じファイル名でも、補完用SEセットや既定音源に置いたRESULT入口音はSE音量で単発再生します。
 ランク別SEの`a` / `aa` / `aaa`にも`.loop`は適用しません。
 

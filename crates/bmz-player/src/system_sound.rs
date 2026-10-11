@@ -346,7 +346,7 @@ impl SoundSetSelection {
 
     /// 選択されたchild、root、既存fallbackの順で各音源を解決する。
     /// RESULT BGMは各layer内で`.loop`版、通常版の順に解決する。
-    /// ただしRESULT入口SEはSEセットとdefaultだけから解決する（セット内の同名音源はBGM）。
+    /// RESULT互換SEも全layerの通常名を探索する。再生コンテキストでBGMとの重複を避ける。
     /// 各段階で拡張子優先順を保ち、読み込みに失敗した候補の次を試せるよう全候補を返す。
     pub fn candidates(&self, sound_type: SoundType) -> Vec<ResolvedSystemSound> {
         SoundSetIndex::read(self).candidates(sound_type)
@@ -382,33 +382,23 @@ impl SoundSetIndex {
         let stem = sound_type.stem();
         let mut candidates = Vec::new();
         let soundset_layers = [self.variant.as_ref(), self.root.as_ref()];
-        let include_soundset = !matches!(
-            sound_type,
-            SoundType::ResultClear
-                | SoundType::ResultFail
-                | SoundType::ResultA
-                | SoundType::ResultAA
-                | SoundType::ResultAAA
-        );
-        if include_soundset {
-            for layer in soundset_layers.into_iter().flatten() {
-                if sound_type == SoundType::Select
-                    || (sound_type.is_result_bgm() && !sound_type.loops())
-                {
-                    candidates.extend(
-                        layer
-                            .files(&format!("{stem}.loop"))
-                            .into_iter()
-                            .map(|path| ResolvedSystemSound { path, loop_playback: true }),
-                    );
-                }
+        for layer in soundset_layers.into_iter().flatten() {
+            if sound_type == SoundType::Select
+                || (sound_type.is_result_bgm() && !sound_type.loops())
+            {
                 candidates.extend(
-                    layer.files(stem).into_iter().map(|path| ResolvedSystemSound {
-                        path,
-                        loop_playback: sound_type.loops(),
-                    }),
+                    layer
+                        .files(&format!("{stem}.loop"))
+                        .into_iter()
+                        .map(|path| ResolvedSystemSound { path, loop_playback: true }),
                 );
             }
+            candidates.extend(
+                layer
+                    .files(stem)
+                    .into_iter()
+                    .map(|path| ResolvedSystemSound { path, loop_playback: sound_type.loops() }),
+            );
         }
         if sound_type.is_result_bgm() {
             return candidates;
@@ -886,6 +876,7 @@ mod tests {
         assert_eq!(
             selection.candidates(SoundType::ResultClear),
             vec![
+                ResolvedSystemSound { path: child.join("clear.ogg"), loop_playback: false },
                 ResolvedSystemSound { path: se.join("clear.wav"), loop_playback: false },
                 ResolvedSystemSound { path: default.join("clear.wav"), loop_playback: false },
             ]
@@ -1034,7 +1025,7 @@ mod tests {
             };
             if let Some(bgm_sound) = result_bgm {
                 assert_eq!(selection.resolve(bgm_sound), Some(bgm.join(name)));
-                assert_eq!(selection.resolve(sound), Some(se.join(name)));
+                assert_eq!(selection.resolve(sound), Some(bgm.join(name)));
             } else {
                 assert_eq!(selection.resolve(sound), Some(bgm.join(name)));
             }

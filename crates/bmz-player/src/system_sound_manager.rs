@@ -798,6 +798,74 @@ fn elapsed_ms_u64(started_at: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn course_legacy_result_se_prefers_child_parent_se_then_default_after_decode_failure() {
+        let root = test_temp_dir("course-result-se-priority");
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        let se = root.join("se");
+        let default = root.join("default");
+        for dir in [&child, &se, &default] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for name in ["clear", "fail", "a", "aa", "aaa"] {
+            for (dir, frames) in [(&child, 2), (&parent, 4), (&se, 6), (&default, 8)] {
+                write_test_wav(&dir.join(format!("{name}.wav")), frames);
+            }
+        }
+        write_test_wav(&parent.join("course_clear.loop.wav"), 2);
+        let selection = SoundSetSelection {
+            bgm_dir: Some(parent.clone()),
+            bgm_variant_dir: Some(child.clone()),
+            se_dir: Some(se.clone()),
+            default_dir: Some(default.clone()),
+        };
+        for (invalid_dir, expected_frames) in
+            [(None, 2), (Some(&child), 4), (Some(&parent), 6), (Some(&se), 8)]
+        {
+            if let Some(dir) = invalid_dir {
+                for name in ["clear", "fail", "a", "aa", "aaa"] {
+                    std::fs::write(dir.join(format!("{name}.wav")), b"broken").unwrap();
+                }
+            }
+            let prepared = SystemSoundManager::prepare(&selection, false, 48_000, None);
+            for sound in [
+                SoundType::ResultClear,
+                SoundType::ResultFail,
+                SoundType::ResultA,
+                SoundType::ResultAA,
+                SoundType::ResultAAA,
+            ] {
+                assert_eq!(
+                    prepared.samples.iter().find(|(s, _, _)| *s == sound).unwrap().2.frames.len(),
+                    expected_frames
+                );
+                assert!(!prepared.looping_sounds.contains(&sound));
+                assert!(!prepared.normalization_paths.contains_key(&sound));
+            }
+        }
+        write_test_wav(&child.join("clear.wav"), 4);
+        let prepared = SystemSoundManager::prepare(&selection, false, 48_000, None);
+        let (engine, mut processor) = test_engine();
+        let manager = SystemSoundManager::from_prepared(engine, prepared, false);
+        let play = |sounds: Vec<SoundType>| {
+            for sound in sounds {
+                manager.play(sound, if sound.is_bgm() { 0.5 } else { 0.25 });
+            }
+        };
+        let first = render(&mut processor, 0, 1);
+        assert_eq!(first, vec![0.0; 2]);
+        play(vec![SoundType::ResultClear, SoundType::CourseBgmClear]);
+        let both = render(&mut processor, 1, 2);
+        assert!(both[0] > 0.0);
+        manager.stop(SoundType::ResultClear);
+        let bgm = render(&mut processor, 3, 2);
+        assert!((both[0] - bgm[0] * 1.5).abs() < 0.00001);
+        manager.stop_all_bgm();
+        play(vec![SoundType::ResultBgmClear]);
+        assert_eq!(render(&mut processor, 5, 2), bgm);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn explicit_enter_and_loop_decode_independently_with_bgm_only_normalization() {
         let root = test_temp_dir("enter-loop-decode");
         let child = root.join("child");
@@ -1010,7 +1078,7 @@ mod tests {
             Some(fingerprint),
         );
         assert!(!changed.reused_existing_sound_set);
-        assert_eq!(changed.stats.decoded_count, 2);
+        assert_eq!(changed.stats.decoded_count, 3);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1178,7 +1246,7 @@ mod tests {
             (SoundType::ResultClear, 7),
             (SoundType::ResultClose, 9),
             (SoundType::ResultBgmAAA, 2),
-            (SoundType::ResultAAA, 3),
+            (SoundType::ResultAAA, 2),
             (SoundType::ResultA, 6),
         ] {
             let sample = prepared.samples.iter().find(|(kind, _, _)| *kind == sound).unwrap();

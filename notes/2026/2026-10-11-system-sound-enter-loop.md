@@ -36,3 +36,16 @@ COURSEの互換SE補完、SE二重再生防止、Select入場待機、音量区�
 
 Windows/Linuxの実行・実機音声確認、macOSのGUIでの聴感確認、GPU/動画出力のignoreテストは未実施。
 外部スキン依存テストの素材欠落による早期returnもあり、テスト成功件数を全スキンの互換確認とは扱わない。
+
+## 追加仕様: RESULT互換SEの探索
+
+2026-10-11追記。ResultClear / ResultFail / ResultA / ResultAA / ResultAAAの通常名も、
+子、親、SEセット、既定音源の順で探索する。`.loop`はSE候補に含めず、SE音量・単発を維持する。
+通常RESULTのBGM優先は維持し、同じ通常名がBGM・SEに登録されても一方だけ再生する。
+COURSE RESULTではcourse専用入場音がなければ、サウンドセットのclear / failを補完用SEより優先する。
+デコード失敗による子→親→SE→既定音源の補完と、COURSE専用BGMとのミキサー同時再生を追加検証する。
+
+追加仕様の検証: fmt / check / all-targets Clippy成功。
+`cargo test -p bmz-player --locked`成功（2,346件成功、失敗0件、21件ignore）。
+全体テストは既存のローカル模擬通信のためサンドボックス外で実行した。
+生ログはGit管理外の`.local/system-sound-followup-tests.log`へ保存。
