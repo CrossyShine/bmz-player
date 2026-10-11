@@ -107,6 +107,7 @@ BMZ Player の継続開発で常に参照する作業方針です。機能の詳
 | config・保存パス・migration | `crates/bmz-player/src/config/`、`src/paths.rs`、`src/storage/migration.rs` |
 | IR client / server | [ir.md](docs/ir.md)、[rian-ir.md](docs/rian-ir.md)、`crates/bmz-player/src/ir/`、`bmz-ir-web/` |
 | 翻訳 | [i18n.md](docs/i18n.md) |
+| プレイヤー向けの文章・マニュアル | [writing-style.md](docs/writing-style.md)、[manual/README.md](manual/README.md) |
 | 配布・更新・ライセンス | [packaging.md](docs/packaging.md)、[auto-update.md](docs/auto-update.md)、[linux-tar.md](docs/linux-tar.md)、[licenses.md](docs/licenses.md) |
 
 操作やキー割り当てを変更するときは `docs/controls.md` を確認・更新します。
