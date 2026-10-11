@@ -308,8 +308,21 @@ pub fn score_record_from_ir_entry(entry: &IrOwnScoreHistoryEntry) -> Result<Scor
         );
     }
 
-    let count_unprocessed_notes =
-        score_record_uses_unprocessed_notes(&score, entry.notes, entry.min_bp, entry.min_cb)?;
+    let count_unprocessed_notes = match score_record_uses_unprocessed_notes(
+        &score,
+        entry.notes,
+        entry.min_bp,
+        entry.min_cb,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            let Some(legacy_pass_notes) = legacy_failed_pass_notes(entry, &score) else {
+                return Err(error);
+            };
+            score.past_notes = legacy_pass_notes;
+            score_record_uses_unprocessed_notes(&score, entry.notes, entry.min_bp, entry.min_cb)?
+        }
+    };
     let rule_mode =
         if entry.rule_mode.trim().is_empty() { "Beatoraja" } else { entry.rule_mode.as_str() };
 
@@ -359,6 +372,34 @@ pub fn score_record_from_ir_entry(entry: &IrOwnScoreHistoryEntry) -> Result<Scor
         replay_path: String::new(),
         source_kind,
     })
+}
+
+fn legacy_failed_pass_notes(entry: &IrOwnScoreHistoryEntry, score: &ScoreState) -> Option<u32> {
+    if clear_type_from_ir(&entry.clear)? != ClearType::Failed || entry.pass_notes != entry.notes {
+        return None;
+    }
+
+    let unprocessed_bp = entry.min_bp.checked_sub(score.bp())?;
+    let unprocessed_cb = entry.min_cb.checked_sub(score.cb())?;
+    if unprocessed_bp == 0 || unprocessed_bp != unprocessed_cb {
+        return None;
+    }
+    let inferred_pass_notes = entry.notes.checked_sub(unprocessed_bp)?;
+    let judged_notes = [
+        score.judges.fast_pgreat,
+        score.judges.slow_pgreat,
+        score.judges.fast_great,
+        score.judges.slow_great,
+        score.judges.fast_good,
+        score.judges.slow_good,
+        score.judges.fast_bad,
+        score.judges.slow_bad,
+        score.judges.fast_poor,
+        score.judges.slow_poor,
+    ]
+    .into_iter()
+    .fold(0_u32, u32::saturating_add);
+    (inferred_pass_notes == judged_notes).then_some(inferred_pass_notes)
 }
 
 fn score_state_from_ir(judges: &IrJudgePayload) -> ScoreState {

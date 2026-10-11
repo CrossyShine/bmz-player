@@ -103,8 +103,45 @@ fn score_record_from_ir_reconstructs_unprocessed_failed_bp() {
     let record = score_record_from_ir_entry(&entry).unwrap();
 
     assert!(record.count_unprocessed_notes);
+    assert_eq!(record.score.past_notes, 12);
     assert_eq!(record.score.bp_with_unprocessed_notes(record.total_notes), 9);
     assert_eq!(record.score.cb_with_unprocessed_notes(record.total_notes), 9);
+}
+
+#[test]
+fn score_record_from_ir_recovers_legacy_failed_backfill_pass_notes_strictly() {
+    let mut entry = score_entry("legacy-failed-backfill");
+    entry.clear = "Failed".to_string();
+    entry.ex_score = 21;
+    entry.notes = 20;
+    entry.pass_notes = 20;
+    entry.bp = 1;
+    entry.cb = 1;
+    entry.min_bp = 9;
+    entry.min_cb = 9;
+
+    let record = score_record_from_ir_entry(&entry).unwrap();
+    assert!(record.count_unprocessed_notes);
+    assert_eq!(record.score.past_notes, 12);
+    assert_eq!(record.score.bp_with_unprocessed_notes(20), 9);
+    assert_eq!(record.score.cb_with_unprocessed_notes(20), 9);
+
+    let mut mismatched_judges = entry.clone();
+    mismatched_judges.judges.fast.pgreat = 9;
+    mismatched_judges.ex_score = 19;
+    assert!(score_record_from_ir_entry(&mismatched_judges).is_err());
+
+    let mut asymmetric_delta = entry.clone();
+    asymmetric_delta.min_cb = 8;
+    assert!(score_record_from_ir_entry(&asymmetric_delta).is_err());
+
+    let mut non_failed = entry.clone();
+    non_failed.clear = "Hard".to_string();
+    assert!(score_record_from_ir_entry(&non_failed).is_err());
+
+    let mut pass_notes_not_total = entry;
+    pass_notes_not_total.pass_notes = 19;
+    assert!(score_record_from_ir_entry(&pass_notes_not_total).is_err());
 }
 
 #[test]

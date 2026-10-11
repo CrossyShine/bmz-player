@@ -107,6 +107,11 @@ SHA-256 fallback でラベルを付与する。
   送信直前にdevice keyで署名し、サーバー側では `signed_backfill` として保存する。
   `source_kind`、1P/2Pの配置、実際に適用したDPオプションも送信し、ランキング用の
   `double_option` バケットとは分けて個別スコアの履歴に保持する。
+  local backfill の `pass_notes` は保存済み判定数から生成し、`empty_poor` は実ノーツ判定数に
+  含めない。Failed スコアでは未処理ノーツ分を `min_bp` / `min_cb` に含めた状態で送るため、
+  download-scores は同じ `pass_notes` からローカル履歴を復元できる。旧backfillで
+  `pass_notes == notes` のまま送信したFailedスコアは、BP/CBの増分が同じ正数で、そこから
+  推定した処理済み数が判定数と一致する場合だけ復元する。不一致の履歴は取り込まずエラーにする。
   既に送信済みで署名のないscoreは `bmz ir attest-submitted --all` で、ローカルの
   成功履歴に残るremote score IDへ後付けattestationを送る。attestationはscore本文を
   再送せず、所有者のdevice keyでscore IDを署名してverificationだけを更新する。

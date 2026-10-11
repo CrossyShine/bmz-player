@@ -621,7 +621,7 @@ fn build_local_score_submission(
             ex_score: row.ex_score,
             max_combo: row.max_combo,
             notes: scored_total_notes,
-            pass_notes: None,
+            pass_notes: Some(judged_note_count(row).min(scored_total_notes)),
             min_bp: row.bp,
             min_cb: row.cb,
             ghost: None,
@@ -635,6 +635,23 @@ fn build_local_score_submission(
         evidence: Default::default(),
         idempotency_key: row.idempotency_key.clone(),
     }
+}
+
+fn judged_note_count(row: &BackfillScoreRow) -> u32 {
+    [
+        row.fast_pgreat,
+        row.slow_pgreat,
+        row.fast_great,
+        row.slow_great,
+        row.fast_good,
+        row.slow_good,
+        row.fast_bad,
+        row.slow_bad,
+        row.fast_poor,
+        row.slow_poor,
+    ]
+    .into_iter()
+    .fold(0_u32, u32::saturating_add)
 }
 
 fn backfill_applied_double_option(row: &BackfillScoreRow) -> DoubleOption {

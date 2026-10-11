@@ -246,6 +246,65 @@ fn local_backfill_payload_marks_submission_source_and_omits_evidence() {
     assert_eq!(payload.idempotency_key, "bmz-score-v2-test-history-key");
     assert_eq!(payload.play_options["submission_source"], LOCAL_BACKFILL_SOURCE);
     assert_eq!(payload.play_options["local_score_history_id"], 42);
+    assert_eq!(payload.result.pass_notes, Some(145));
+}
+
+#[test]
+fn failed_local_backfill_roundtrips_processed_notes_and_unprocessed_bp_cb() {
+    let mut row = test_row();
+    row.clear_type = "Failed".to_string();
+    row.total_notes = 20;
+    row.double_option = DoubleOptionScoreBucket::Off;
+    row.ex_score = 21;
+    row.bp = 11;
+    row.cb = 9;
+    row.fast_pgreat = 10;
+    row.slow_pgreat = 0;
+    row.fast_great = 1;
+    row.slow_great = 0;
+    row.fast_good = 0;
+    row.slow_good = 0;
+    row.fast_bad = 0;
+    row.slow_bad = 1;
+    row.fast_poor = 0;
+    row.slow_poor = 0;
+    row.fast_empty_poor = 0;
+    row.slow_empty_poor = 2;
+    let mut chart = test_chart();
+    chart.total_notes = 20;
+    chart.ln_counts = Default::default();
+
+    let payload = build_local_score_submission(&row, &chart, None, None);
+    assert_eq!(payload.result.notes, 20);
+    assert_eq!(payload.result.pass_notes, Some(12));
+    assert_eq!(payload.result.min_bp, 11);
+    assert_eq!(payload.result.min_cb, 9);
+
+    let mut entry = imported_score_entry(row.chart_sha256);
+    entry.clear = payload.result.clear.clone();
+    entry.ex_score = payload.result.ex_score;
+    entry.min_bp = payload.result.min_bp;
+    entry.min_cb = payload.result.min_cb;
+    entry.bp = 3;
+    entry.cb = 1;
+    entry.notes = payload.result.notes;
+    entry.pass_notes = payload.result.pass_notes.unwrap();
+    entry.judges = payload.result.judges;
+    let restored = crate::ir::download::score_record_from_ir_entry(&entry).unwrap();
+    assert!(restored.count_unprocessed_notes);
+    assert_eq!(restored.score.past_notes, 12);
+    assert_eq!(restored.score.bp(), 3);
+    assert_eq!(restored.score.cb(), 1);
+    assert_eq!(restored.score.bp_with_unprocessed_notes(20), 11);
+    assert_eq!(restored.score.cb_with_unprocessed_notes(20), 9);
+
+    let mut score_db = test_score_db();
+    score_db.insert_score(&restored).unwrap();
+    let stored_bp_cb: (u32, u32) = score_db
+        .conn()
+        .query_row("SELECT bp, cb FROM score_history", [], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap();
+    assert_eq!(stored_bp_cb, (11, 9));
 }
 
 #[test]
