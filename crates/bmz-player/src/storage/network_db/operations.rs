@@ -12,6 +12,40 @@ fn job_submission_key(job: &NewIrScoreJob) -> String {
         .unwrap_or_else(|| format!("local:{}", job.local_score_id))
 }
 
+fn upsert_ir_score_success_ledger(
+    tx: &rusqlite::Transaction<'_>,
+    record: &NewIrScoreSubmission,
+) -> Result<()> {
+    if record.status != "succeeded" {
+        return Ok(());
+    }
+    let submission_key: String = tx.query_row(
+        "SELECT submission_key FROM ir_score_jobs WHERE id = ?1",
+        [record.job_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO ir_score_success_ledger (
+            provider, account_id, kind, submission_key, local_score_id,
+            remote_score_id, submitted_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(provider, account_id, kind, submission_key) DO UPDATE SET
+            local_score_id = excluded.local_score_id,
+            remote_score_id = excluded.remote_score_id,
+            submitted_at = excluded.submitted_at",
+        params![
+            record.provider,
+            record.account_id,
+            record.kind.as_str(),
+            submission_key,
+            record.local_score_id,
+            record.remote_score_id,
+            record.submitted_at,
+        ],
+    )?;
+    Ok(())
+}
+
 impl NetworkDatabase {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
@@ -547,11 +581,10 @@ impl NetworkDatabase {
         let submitted = {
             let mut statement = self.conn.prepare(
                 "SELECT DISTINCT local_score_id, remote_score_id
-                 FROM ir_score_submissions
+                 FROM ir_score_success_ledger
                  WHERE provider = ?1
                    AND account_id = ?2
                    AND kind = 'score'
-                   AND status = 'succeeded'
                    AND remote_score_id != ''
                  ORDER BY local_score_id ASC",
             )?;
@@ -564,11 +597,21 @@ impl NetworkDatabase {
 
         let mut enqueued = 0;
         for (local_score_id, remote_score_id) in submitted {
-            if self.has_ir_score_job(
+            if self.has_successful_ir_score_submission_for_remote_score(
                 provider,
                 account_id,
                 IrJobKind::Attestation,
                 local_score_id,
+                &remote_score_id,
+            )? {
+                continue;
+            }
+            if self.has_ir_score_job_for_remote_score(
+                provider,
+                account_id,
+                IrJobKind::Attestation,
+                local_score_id,
+                &remote_score_id,
             )? {
                 continue;
             }
@@ -682,7 +725,8 @@ impl NetworkDatabase {
     }
 
     pub fn insert_ir_score_submission(&mut self, record: &NewIrScoreSubmission) -> Result<i64> {
-        self.conn.execute(
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
             "INSERT INTO ir_score_submissions (
                 job_id, provider, account_id, kind, local_score_id, remote_score_id,
                 status, submitted_at, log_path, error
@@ -700,7 +744,10 @@ impl NetworkDatabase {
                 record.error,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = tx.last_insert_rowid();
+        upsert_ir_score_success_ledger(&tx, record)?;
+        tx.commit()?;
+        Ok(id)
     }
 
     pub fn complete_ir_score_job(
@@ -729,6 +776,7 @@ impl NetworkDatabase {
                 response_json,
             ],
         )?;
+        upsert_ir_score_success_ledger(&tx, record)?;
         if let Some(job) = replay_job {
             tx.execute(
                 "INSERT INTO ir_score_jobs (
@@ -805,19 +853,87 @@ impl NetworkDatabase {
         self.conn
             .query_row(
                 "SELECT local_score_id
-                 FROM ir_score_submissions
+                 FROM ir_score_success_ledger
                  WHERE provider = ?1
                    AND account_id = ?2
                    AND kind = 'score'
                    AND remote_score_id = ?3
-                   AND status = 'succeeded'
-                 ORDER BY submitted_at DESC, id DESC
+                 ORDER BY submitted_at DESC
                  LIMIT 1",
                 params![provider, account_id, remote_score_id],
                 |row| row.get(0),
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn has_successful_ir_score_submission(
+        &self,
+        provider: &str,
+        account_id: &str,
+        kind: IrJobKind,
+        local_score_id: i64,
+    ) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM ir_score_success_ledger
+             WHERE provider = ?1 AND account_id = ?2 AND kind = ?3 AND local_score_id = ?4
+             LIMIT 1",
+                params![provider, account_id, kind.as_str(), local_score_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    fn has_successful_ir_score_submission_for_remote_score(
+        &self,
+        provider: &str,
+        account_id: &str,
+        kind: IrJobKind,
+        local_score_id: i64,
+        remote_score_id: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM ir_score_success_ledger
+                 WHERE provider = ?1 AND account_id = ?2 AND kind = ?3
+                   AND local_score_id = ?4 AND remote_score_id = ?5
+                 LIMIT 1",
+                params![provider, account_id, kind.as_str(), local_score_id, remote_score_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    fn has_ir_score_job_for_remote_score(
+        &self,
+        provider: &str,
+        account_id: &str,
+        kind: IrJobKind,
+        local_score_id: i64,
+        remote_score_id: &str,
+    ) -> Result<bool> {
+        let mut statement = self.conn.prepare(
+            "SELECT payload_json FROM ir_score_jobs
+             WHERE provider = ?1 AND account_id = ?2 AND kind = ?3
+               AND local_score_id = ?4 AND status IN ('pending', 'sending', 'failed')",
+        )?;
+        let payloads = statement
+            .query_map(params![provider, account_id, kind.as_str(), local_score_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(payloads.into_iter().any(|payload| {
+            serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|value| value.get("remote_score_id")?.as_str().map(str::to_owned))
+                .as_deref()
+                == Some(remote_score_id)
+        }))
     }
 
     pub fn prune_succeeded_ir_score_jobs(&mut self, now: i64) -> Result<usize> {
@@ -865,9 +981,8 @@ impl NetworkDatabase {
             let placeholders = sql_placeholders(ids.len());
             let sql = format!(
                 "SELECT DISTINCT provider, account_id, local_score_id, remote_score_id
-                 FROM ir_score_submissions
+                 FROM ir_score_success_ledger
                  WHERE kind = 'score'
-                   AND status = 'succeeded'
                    AND remote_score_id != ''
                    AND local_score_id IN ({placeholders})
                  ORDER BY provider, account_id, local_score_id, remote_score_id"
@@ -917,6 +1032,13 @@ impl NetworkDatabase {
             report.removed_submissions = report.removed_submissions.saturating_add(
                 tx.execute(&submissions_sql, params_from_iter(parameters()))? as u32,
             );
+            let ledger_sql = format!(
+                "DELETE FROM ir_score_success_ledger
+                 WHERE provider = ?1
+                   AND account_id = ?2
+                   AND local_score_id IN ({placeholders})"
+            );
+            tx.execute(&ledger_sql, params_from_iter(parameters()))?;
             let jobs_sql = format!(
                 "DELETE FROM ir_score_jobs
                  WHERE provider = ?1

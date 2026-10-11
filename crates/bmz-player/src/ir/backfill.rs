@@ -5,7 +5,6 @@ use anyhow::{Context, Result, bail};
 use bmz_chart::model::LongNoteMode;
 use bmz_core::input::InputDeviceKind;
 use bmz_gameplay::gauge::gauge_total_for_chart;
-use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -246,23 +245,12 @@ fn has_successful_score_submission(
     target: &TargetProvider,
     local_score_id: i64,
 ) -> Result<bool> {
-    let found = network_db
-        .conn()
-        .query_row(
-            "SELECT 1
-             FROM ir_score_submissions
-             WHERE provider = ?1
-               AND account_id = ?2
-               AND kind = 'score'
-               AND local_score_id = ?3
-               AND status = 'succeeded'
-             LIMIT 1",
-            params![target.provider_key, target.account_id, local_score_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    Ok(found)
+    network_db.has_successful_ir_score_submission(
+        &target.provider_key,
+        &target.account_id,
+        IrJobKind::Score,
+        local_score_id,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

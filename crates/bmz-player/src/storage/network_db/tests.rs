@@ -118,9 +118,11 @@ fn submission_identity_migration_preserves_jobs_and_submission_history() {
         (id, provider, account_id, kind, local_score_id, chart_sha256, ln_policy, payload_json,
          status, attempt_count, next_attempt_at, last_error, created_at, updated_at)
         VALUES (5, 'bmz', 'player', 'score', 95, 'hash', 'ForceLn',
-                '{\"idempotency_key\":\"bmz-score-95\"}', 'failed', 3, 999, 'offline', 1, 2);
+                '{\"idempotency_key\":\"bmz-score-95\"}', 'failed', 3, 999, 'offline', 1, 2),
+               (6, 'bmz', 'player', 'score', 96, 'hash', 'ForceLn',
+                '{\"idempotency_key\":\"bmz-score-96\"}', 'succeeded', 0, 2, '', 1, 2);
         INSERT INTO ir_score_submissions (job_id, provider, local_score_id, status, submitted_at)
-        VALUES (5, 'bmz', 95, 'failed', 2);",
+        VALUES (5, 'bmz', 95, 'failed', 2), (6, 'bmz', 96, 'succeeded', 3);",
     )
     .unwrap();
     run_migrations(&mut conn, NETWORK_MIGRATIONS).unwrap();
@@ -133,6 +135,14 @@ fn submission_identity_migration_preserves_jobs_and_submission_history() {
             .unwrap(),
         5
     );
+    let migrated: (String, i64, String) = conn
+        .query_row(
+            "SELECT submission_key, local_score_id, remote_score_id FROM ir_score_success_ledger",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(migrated, ("bmz-score-96".into(), 96, String::new()));
     assert!(
         conn.prepare("PRAGMA foreign_key_check")
             .unwrap()
@@ -146,8 +156,45 @@ fn submission_identity_migration_preserves_jobs_and_submission_history() {
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM ir_score_submissions", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        0
+        1
     );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ir_score_success_ledger", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn success_ledger_migration_copies_existing_v4_successes() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    configure_connection(&conn).unwrap();
+    run_migrations(&mut conn, &NETWORK_MIGRATIONS[..4]).unwrap();
+    conn.execute_batch(
+        "INSERT INTO ir_score_jobs
+        (id, provider, account_id, kind, local_score_id, chart_sha256, ln_policy, payload_json,
+         status, attempt_count, next_attempt_at, last_error, created_at, updated_at, submission_key)
+        VALUES (41, 'bmz', 'player', 'score', 95, 'hash', 'ForceLn', '',
+                'succeeded', 0, 2, '', 1, 2, 'bmz-score-v2-existing');
+        INSERT INTO ir_score_submissions
+        (job_id, provider, account_id, kind, local_score_id, remote_score_id, status, submitted_at)
+        VALUES (41, 'bmz', 'player', 'score', 95, 'remote-95', 'succeeded', 2);",
+    )
+    .unwrap();
+
+    run_migrations(&mut conn, NETWORK_MIGRATIONS).unwrap();
+
+    let migrated: (String, String, i64) = conn
+        .query_row(
+            "SELECT submission_key, remote_score_id, local_score_id
+             FROM ir_score_success_ledger",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(migrated, ("bmz-score-v2-existing".into(), "remote-95".into(), 95));
 }
 
 #[test]
@@ -392,6 +439,11 @@ fn cleanup_removes_selected_provider_records_for_removed_local_scores() {
         db.purge_ir_records_for_local_scores("bmz", "account-1", &[42]).unwrap(),
         IrLocalScoreCleanupReport { removed_jobs: 2, removed_submissions: 1 }
     );
+    let ledger_count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM ir_score_success_ledger", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(ledger_count, 0);
     let remaining: Vec<(String, String)> = db
         .conn()
         .prepare("SELECT provider, account_id FROM ir_score_jobs ORDER BY id")
@@ -727,6 +779,25 @@ fn submitted_scores_enqueue_one_attestation_job() {
     let payload: serde_json::Value = serde_json::from_str(&job.payload_json).unwrap();
     assert_eq!(job.local_score_id, 42);
     assert_eq!(payload["remote_score_id"], "remote-42");
+    db.complete_ir_score_job(
+        &NewIrScoreSubmission {
+            job_id: job.id,
+            provider: "bmz-official".to_string(),
+            account_id: "account-1".to_string(),
+            kind: IrJobKind::Attestation,
+            local_score_id: 42,
+            remote_score_id: "remote-42".to_string(),
+            status: "succeeded".to_string(),
+            submitted_at: 302,
+            log_path: String::new(),
+            error: String::new(),
+        },
+        None,
+        "{}",
+    )
+    .unwrap();
+    db.conn().execute("DELETE FROM ir_score_jobs WHERE id = ?1", [job.id]).unwrap();
+    assert_eq!(db.enqueue_ir_score_attestation_jobs("bmz-official", "account-1", 303).unwrap(), 0);
 }
 
 #[test]
@@ -830,6 +901,14 @@ fn prune_succeeded_ir_score_jobs_keeps_recent_and_unfinished_jobs() {
         )
         .unwrap();
     assert_eq!(stale_submission_count, 0);
+    assert!(
+        db.has_successful_ir_score_submission("bmz-official", "account-1", IrJobKind::Score, 1)
+            .unwrap()
+    );
+    assert_eq!(
+        db.local_score_id_for_remote_score("bmz-official", "account-1", "remote-a").unwrap(),
+        Some(1)
+    );
 }
 
 fn enqueue_listed_job(

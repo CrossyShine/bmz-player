@@ -87,7 +87,11 @@ SHA-256 fallback でラベルを付与する。
   replay upload / verify の失敗は replay job だけを再試行し、成功済み score を
   未送信状態へ戻さない。
   成功済み job は payload を空にし、同期後に 30 日以内または最新 500 件だけを
-  `network.db` に保持する。未送信 / 失敗 / 送信中 job は剪定対象外。
+  `network.db` に保持する。未送信 / 失敗 / 送信中 job は剪定対象外。成功判定と
+  remote score ID の紐付けは job/log の保持期間から独立した小さな成功台帳にも保存し、
+  pruning後も upload-local の既送信判定と download-scores の既存履歴リンクに使う。
+  migration は残っている成功submissionから台帳を作るが、過去に pruning 済みの
+  submission にしかなかった remote ID / 紐付けは復元できない。
 - local backfill: `bmz ir upload-local [--dry-run] [--limit N] [--sync] [--all]` で
   `score.db` の既存 `score_history` を `local_backfill` source の score submit として enqueue
   する。既送信履歴と既に queue にある履歴は既定でスキップし、course stage /
@@ -103,8 +107,9 @@ SHA-256 fallback でラベルを付与する。
   既に送信済みで署名のないscoreは `bmz ir attest-submitted --all` で、ローカルの
   成功履歴に残るremote score IDへ後付けattestationを送る。attestationはscore本文を
   再送せず、所有者のdevice keyでscore IDを署名してverificationだけを更新する。
-  成功履歴の保持期間外でremote score IDを失ったscoreは対象外で、将来のserver側一括
-  attestation APIが必要になる。
+  現行DBでは成功台帳がjob/logのpruning後もremote score IDを保持する。成功台帳の追加前に
+  jobをpruningしてremote score IDが失われた旧DBの履歴は復元できず、そのscoreは対象外。
+  その場合は将来のserver側一括 attestation APIが必要になる。
   同じユーザー・`idempotency_key`・同じプレイ内容の再送は、保存済みscoreを副作用なしで成功として返す。
   同じkeyで譜面・ルール・成績などが異なる場合は409 Conflictを返す。
   これは廃止済みのevidence形式でqueueに残ったjobを回復するためで、初回送信の署名・
@@ -1942,6 +1947,11 @@ CREATE TABLE ir_score_submissions (
 CREATE INDEX idx_ir_score_submissions_local_score
     ON ir_score_submissions(local_score_id);
 ```
+
+`ir_score_success_ledger` は成功したjobの idempotency key、local / remote score IDを
+`ir_score_jobs` への外部キーなしで保持する。jobの30日 / 最新500件pruningでは削除せず、
+upload-local、download-scores、attestation、IR cleanup が成功履歴を参照する。
+cleanupで対応するlocal scoreを削除するときは、submission/jobと同じtransactionで台帳も消す。
 
 ### Local score device type
 

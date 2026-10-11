@@ -212,6 +212,98 @@ fn import_ir_score_entries_links_previously_uploaded_local_score() {
 }
 
 #[test]
+fn pruning_old_success_keeps_upload_and_remote_link_identity() {
+    let mut score_db = open_score_db();
+    let mut network_db = open_network_db();
+    let local_record = score_record_from_ir_entry(&score_entry("local")).unwrap();
+    let local_history_id = score_db.insert_score(&local_record).unwrap();
+
+    for index in 0..501_i64 {
+        let local_score_id = if index == 0 { local_history_id } else { 10_000 + index };
+        let job_id = network_db
+            .enqueue_ir_score_job(&NewIrScoreJob {
+                provider: "provider-1".to_string(),
+                account_id: "account-1".to_string(),
+                kind: IrJobKind::Score,
+                local_score_id,
+                chart_sha256: [0x11; 32],
+                ln_policy: LnScorePolicy::ForceLn,
+                payload_json: format!("{{\"idempotency_key\":\"submission-{index}\"}}"),
+                now: index,
+            })
+            .unwrap();
+        let remote_score_id = if index == 0 { "remote-old".to_string() } else { String::new() };
+        network_db
+            .complete_ir_score_job(
+                &NewIrScoreSubmission {
+                    job_id,
+                    provider: "provider-1".to_string(),
+                    account_id: "account-1".to_string(),
+                    kind: IrJobKind::Score,
+                    local_score_id,
+                    remote_score_id,
+                    status: "succeeded".to_string(),
+                    submitted_at: index,
+                    log_path: String::new(),
+                    error: String::new(),
+                },
+                None,
+                "{}",
+            )
+            .unwrap();
+    }
+
+    assert_eq!(network_db.prune_succeeded_ir_score_jobs(31 * 24 * 60 * 60 + 1).unwrap(), 1);
+    assert!(
+        network_db
+            .has_successful_ir_score_submission(
+                "provider-1",
+                "account-1",
+                IrJobKind::Score,
+                local_history_id
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        network_db
+            .local_score_id_for_remote_score("provider-1", "account-1", "remote-old")
+            .unwrap(),
+        Some(local_history_id)
+    );
+
+    let play_count_before: i64 = score_db
+        .conn()
+        .query_row("SELECT play_count FROM score_best", [], |row| row.get(0))
+        .unwrap();
+
+    let mut report = IrScoreDownloadReport::default();
+    import_ir_score_entries(
+        &mut score_db,
+        &network_db,
+        "provider-1",
+        "account-1",
+        &[score_entry("remote-old")],
+        false,
+        100_001,
+        &mut report,
+    )
+    .unwrap();
+
+    assert_eq!(report.linked_existing, 1);
+    assert_eq!(report.imported, 0);
+    let score_count: i64 = score_db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM score_history", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(score_count, 1);
+    let play_count_after: i64 = score_db
+        .conn()
+        .query_row("SELECT play_count FROM score_best", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(play_count_after, play_count_before);
+}
+
+#[test]
 fn import_limit_skips_known_scores_before_importing_next_candidate() {
     let mut score_db = open_score_db();
     let network_db = open_network_db();

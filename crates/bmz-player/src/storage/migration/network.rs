@@ -152,4 +152,33 @@ pub const NETWORK_MIGRATIONS: &[Migration] = &[
                 ON ir_score_submissions(submitted_at);",
         ],
     },
+    Migration {
+        version: 5,
+        statements: &[
+            "CREATE TABLE ir_score_success_ledger (
+                provider TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                submission_key TEXT NOT NULL,
+                local_score_id INTEGER NOT NULL,
+                remote_score_id TEXT NOT NULL DEFAULT '',
+                submitted_at INTEGER NOT NULL,
+                PRIMARY KEY(provider, account_id, kind, submission_key)
+            );",
+            "INSERT OR REPLACE INTO ir_score_success_ledger (
+                provider, account_id, kind, submission_key, local_score_id,
+                remote_score_id, submitted_at
+             )
+             SELECT s.provider, s.account_id, s.kind, j.submission_key,
+                    s.local_score_id, s.remote_score_id, MAX(s.submitted_at)
+             FROM ir_score_submissions s
+             JOIN ir_score_jobs j ON j.id = s.job_id
+             WHERE s.status = 'succeeded'
+             GROUP BY s.provider, s.account_id, s.kind, j.submission_key;",
+            "CREATE INDEX idx_ir_score_success_ledger_local_score
+                ON ir_score_success_ledger(kind, local_score_id);",
+            "CREATE INDEX idx_ir_score_success_ledger_remote_score
+                ON ir_score_success_ledger(provider, account_id, remote_score_id);",
+        ],
+    },
 ];
