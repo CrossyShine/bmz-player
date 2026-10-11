@@ -108,6 +108,10 @@ fn archive_preview_metadata_uses_declared_extension_fallback_before_prefix() {
 #[test]
 fn shallow_scan_registers_nested_archive_charts_bytes_and_metadata_without_materializing() {
     let mut f = Fixture::new();
+    // The library keeps the configured root spelling. Configure the canonical root so
+    // the canonical lookup below holds even where temp_dir is behind a symlink
+    // (macOS /var -> /private/var).
+    f.roots[0].path = f.dir.canonicalize().unwrap().to_string_lossy().into_owned();
     f.zip(
         "songs.zip",
         &[
