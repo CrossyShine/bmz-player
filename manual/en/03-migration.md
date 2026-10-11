@@ -31,6 +31,8 @@ Open Settings → **Data import** → **Import Scores**.
 
 The number of imported scores and the number that could not be imported are shown.
 
+To put imported scores on IR as well, log in as described in [Join the internet ranking (IR)](02-setup.md), then use "Upload all local scores" in Settings → **IR**.
+
 ### If imported scores do not appear
 
 BMZ Player saves scores separately for each rule (how timing and gauges work).

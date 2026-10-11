@@ -144,4 +144,30 @@ With an IR account, your scores are registered in an online ranking where you ca
 After you log in, your scores are submitted automatically.
 BMZ Player also supports rianIR and BMS-IR, and you can log in to them on the same page.
 
+### Uploading and downloading past scores
+
+Settings → **IR** → "Bulk score operations" offers two actions.
+
+- "Upload all local scores": sends the scores stored on this PC to your Primary IR. Use it to put scores imported from LR2 or beatoraja on IR.
+- "Download scores from IR": imports your own scores stored on IR into this PC. Use it to bring scores played on another PC up to date.
+
+Pressing a button opens a confirmation window. For the upload, it shows how many scores will be sent and a rough minimum time. Press "Start" to begin.
+
+- With many scores, it can take from a few minutes to well over half an hour. Progress is shown on the same page, and the work continues even if you close the settings window.
+- Press "Cancel" to stop at any time. Running it again continues where it stopped.
+- You cannot switch profiles while it is running.
+- Bulk operations work only for your Primary IR. Uploading local scores is available for BMZ IR only, and downloading works with every IR except rianIR. The buttons are disabled when you are not logged in.
+
+You are notified when it finishes.
+
+### Checking and resending scores that failed to send
+
+"Open send queue" opens the "IR send queue", a list of scores that are waiting, being sent, or failed. It first shows only failed scores. Change the filter with "Show", and press "Refresh" to update the list.
+
+- Each row shows the type, chart, status, number of attempts, next retry time, and the last error.
+- "Resend" on a failed row sends that score again right away.
+- "Resend all failed" sends the failed scores again one by one, after a confirmation window.
+
+Failed scores are also retried automatically after a delay. Use these buttons when you want to resend right away after a connection problem is fixed. A score that another process is already sending is sent after that process finishes.
+
 Setup is complete. See [Basic controls](04-controls.md) for how to play.

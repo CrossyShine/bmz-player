@@ -69,7 +69,7 @@ SHA-256 fallback でラベルを付与する。
 
 ### クライアント (bmz-player)
 
-- CLI: `bmz ir login|logout|status|ranking|sync|upload-local|attest-submitted|cleanup-imported|cleanup-duplicate|rivals|device-key|replay`。
+- CLI: `bmz ir login|logout|status|ranking|sync|upload-local|download-scores|attest-submitted|cleanup-imported|cleanup-duplicate|rivals|device-key|replay`。
   egui プロファイル設定からもログイン可能。
 - 送信: リザルト確定時に譜面時間を `result.duration_ms` へ含め、
   `ir_score_jobs` へ enqueue (send_policy 判定込み) →
@@ -110,6 +110,38 @@ SHA-256 fallback でラベルを付与する。
   これは廃止済みのevidence形式でqueueに残ったjobを回復するためで、初回送信の署名・
   データ検証も行う。
   per-history ghost は現在の `score_history` には保持していないため送らない。
+- ゲーム内の手動IR操作: 設定 → IR の「スコアの一括操作」と、そこから開く「IR送信キュー」
+  ウィンドウ。処理は CLI と共通の `ir::manual`（`upload_local_batch` / `upload_local_all` /
+  `sync_jobs` / `download_scores` / `resend_job` / `resend_failed_jobs`）で、CLI は進捗通知を
+  従来の出力へ変換するだけにしている。
+  - 対象は primary provider のみ。ローカルスコアの一括送信は BMZ IR のみ（BMS-IR / rianIR は
+    非対応）、スコア取得は rianIR を除く。未ログインやアカウント未確定の間はボタンを無効にする。
+  - 「ローカルスコアを一括送信」は `ir upload-local --all` 相当の完走モードで、
+    `include_replay` と `include_course_stages` は CLI 既定値（どちらも false）。
+    確認モーダルを開くと、dry-run 相当で候補件数を数え（送信待ちの既存 job も加える）、
+    `件数 × IR_CLI_SYNC_JOB_SPACING_MS` を最短時間の目安として表示する。
+  - 「IRからスコアを取得」は `ir download-scores` 相当で、CLI の既定上限（200 件）を付けず全件を対象にする。
+    既に取り込んだ score は除外されるため、中断後の再実行は続きから進む。
+  - 送信は `IR_CLI_SYNC_BATCH_LIMIT`（100）件ずつ、job 間 `IR_CLI_SYNC_JOB_SPACING_MS`（200ms）。
+    中断は job 間・batch 間・送信間隔の sleep 中に確認し、処理中の 1 件は完了させてから止まる。
+  - 書き込み系の操作は同時に 1 つ。要求ごとの世代番号で、古い結果・進捗・一覧読み込みは破棄する。
+    専用スレッドの current-thread runtime で動き、設定ウィンドウを閉じても継続する。
+    完了・失敗・中断はトーストで通知する。
+  - 実行中は常駐ワーカーを一時停止し、終了・失敗・中断のいずれでも再開する。
+  - 他のプロセスや停止前に claim 済みの job が `sending` で進捗できない場合は、15 秒間隔で
+    再試行する。進捗なしのまま 6 分（lease 5 分 + 余裕）続くと停止して報告する。待機中も中断できる。
+    失敗 job があった場合は待たずに停止する。
+  - 実行中は profile 切替を開始できない（UI も無効）。アプリ終了時は中断を要求して処理中の
+    1 件を最大 3 秒待つ。待ち切れなかった job は `sending` のまま残り、5 分の lease 後に再取得される。
+  - 送信キュー画面は `list_ir_score_jobs` / `ir_score_job_status_counts` で読み、status 別件数、
+    status フィルタ（既定: 失敗）、1 ページ 50 件のページングを持つ。並びは failed → sending →
+    pending → succeeded、次に更新日時の新しい順。DB 読み込みは別スレッドで行い、UI スレッドでは開かない。
+    一覧は操作の完了後に自動で再読み込みする。
+  - 再送（個別・失敗分一括）は状態を直接書き換えず、通常の送信と同じ claim 経由で、
+    再試行待ち時刻（backoff）を無視して送る。`Immediate` トランザクション内で `sending` へ更新するため、
+    常駐ワーカーや他プロセスが送信中の job は二重に送らず、「送信中のため送らなかった」件数として数える。
+    失敗分の一括再送は開始時点の failed 一覧を対象に固定する。
+  - Decide / Play 中は IR 設定と同様に操作できない。
 - import cleanup: `bmz ir cleanup-imported` は、Beatoraja 行と譜面 hash、プレイ日時、
   EX、全判定内訳、BP、CB、max combo、random seed が一致する旧 `source_kind=Local`
   履歴を dry-run で表示する。`--apply` は選択した provider/account の明示的な
