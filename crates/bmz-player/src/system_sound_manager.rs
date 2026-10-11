@@ -56,6 +56,8 @@ pub struct PreparedSystemSoundSet {
     normalization_keys: HashMap<SoundType, LoudnessCacheKey>,
     source_fingerprint: Option<SystemSoundSourceFingerprint>,
     samples: Vec<(SoundType, SoundId, DecodedSample)>,
+    /// 同じ単発SE音源を共有する音種。デコード・登録を1回に抑え、IDだけを割り当てる。
+    shared_sample_ids: Vec<(SoundType, SoundId)>,
     looping_sounds: HashSet<SoundType>,
     bgm_sounds: HashSet<SoundType>,
     bgm_normalization_gains: HashMap<SoundType, f32>,
@@ -213,6 +215,7 @@ impl SystemSoundManager {
                 normalization_keys: HashMap::new(),
                 source_fingerprint,
                 samples: Vec::new(),
+                shared_sample_ids: Vec::new(),
                 looping_sounds: HashSet::new(),
                 bgm_sounds: HashSet::new(),
                 bgm_normalization_gains: HashMap::new(),
@@ -229,6 +232,8 @@ impl SystemSoundManager {
         let mut normalization_keys = HashMap::new();
         let mut loader = FfmpegSampleLoader::default();
         let mut samples = Vec::new();
+        let mut shared_sample_ids = Vec::new();
+        let mut se_ids_by_path = HashMap::<PathBuf, SoundId>::new();
         let mut looping_sounds = HashSet::new();
         let mut bgm_sounds = HashSet::new();
         let mut stats = SystemSoundPrepareStats::default();
@@ -247,8 +252,19 @@ impl SystemSoundManager {
                 );
                 continue;
             }
+            let is_se = |candidate: &ResolvedSystemSound| {
+                !candidate.loop_playback && *sound_type != SoundType::Decide
+            };
             for candidate in candidates {
                 let path = candidate.path.clone();
+                // 通常RESULT音源はRESULT BGMと互換SEの両方で同じファイルに解決されうる。
+                // どちらも単発SEなので、同一サンプルを共有しても音量・正規化区分は変わらない。
+                if is_se(candidate)
+                    && let Some(&shared_id) = se_ids_by_path.get(&path)
+                {
+                    shared_sample_ids.push((*sound_type, shared_id));
+                    break;
+                }
                 let decode_started_at = Instant::now();
                 match loader.load(&path) {
                     Ok(sample) => {
@@ -293,6 +309,9 @@ impl SystemSoundManager {
                             sample.resampled_to(output_sample_rate)
                         };
                         samples.push((*sound_type, id, sample));
+                        if is_se(candidate) {
+                            se_ids_by_path.insert(path, id);
+                        }
                         if candidate.loop_playback {
                             looping_sounds.insert(*sound_type);
                         }
@@ -324,6 +343,7 @@ impl SystemSoundManager {
             normalization_keys,
             source_fingerprint,
             samples,
+            shared_sample_ids,
             looping_sounds,
             bgm_sounds,
             bgm_normalization_gains,
@@ -347,6 +367,7 @@ impl SystemSoundManager {
                 AudioEngineCommand::InsertPreparedSample { id, sample }
             })
             .collect::<Vec<_>>();
+        id_map.extend(prepared.shared_sample_ids);
         if !commands.is_empty() && !engine.push_commands(commands) {
             tracing::warn!("failed to enqueue decoded system sounds");
         }
@@ -473,6 +494,7 @@ impl SystemSoundManager {
             normalization_keys,
             source_fingerprint: None,
             samples: Vec::new(),
+            shared_sample_ids: Vec::new(),
             looping_sounds: HashSet::new(),
             bgm_sounds: paths.keys().copied().collect(),
             bgm_normalization_gains: gains,
@@ -637,7 +659,8 @@ impl SystemSoundManager {
         self.engine.stop_sound_with_fade_out(id, fade_out_frames);
     }
 
-    /// シーン音源をすべて停止する。単発RESULTも音量区分に関係なく含める。
+    /// シーン音源をすべて停止する。通常名の単発RESULT音源も音量区分に関係なく含める。
+    /// `.enter`入場SEは対象外のため、呼び出し側で個別に停止する。
     pub fn stop_all_bgm(&self) {
         let commands = SoundType::ALL
             .iter()
@@ -814,7 +837,58 @@ fn elapsed_ms_u64(started_at: Instant) -> u64 {
 }
 
 #[cfg(test)]
+impl PreparedSystemSoundSet {
+    /// 共有IDを含め、音種に登録されるサンプルのフレーム数を返す。
+    fn frames_for(&self, sound_type: SoundType) -> Option<usize> {
+        let id = self
+            .samples
+            .iter()
+            .map(|(kind, id, _)| (*kind, *id))
+            .chain(self.shared_sample_ids.iter().copied())
+            .find_map(|(kind, id)| (kind == sound_type).then_some(id))?;
+        self.samples
+            .iter()
+            .find(|(_, sample_id, _)| *sample_id == id)
+            .map(|(_, _, s)| s.frames.len())
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use bmz_audio::command::CommandedAudioEngine;
+    use bmz_audio::engine::AudioEngine;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn plain_result_source_is_decoded_once_and_shared_by_bgm_and_se_types() {
+        let root = test_temp_dir("shared-plain-result");
+        std::fs::create_dir_all(&root).unwrap();
+        write_test_wav(&root.join("clear.wav"), 3);
+        write_test_wav(&root.join("aaa.wav"), 5);
+        write_test_wav(&root.join("aaa.loop.wav"), 7);
+        let selection = SoundSetSelection { bgm_dir: Some(root.clone()), ..Default::default() };
+        let prepared = SystemSoundManager::prepare(&selection, true, 48_000, None);
+        assert_eq!(prepared.stats.decoded_count, 3);
+        assert_eq!(prepared.samples.len(), 3);
+        assert_eq!(prepared.frames_for(SoundType::ResultBgmClear), Some(3));
+        assert_eq!(prepared.frames_for(SoundType::ResultClear), Some(3));
+        assert_eq!(prepared.frames_for(SoundType::ResultBgmAAA), Some(7), "loop is not shared");
+        assert_eq!(prepared.frames_for(SoundType::ResultAAA), Some(5));
+        let (engine, mut processor) = test_engine();
+        let manager = SystemSoundManager::from_prepared(engine, prepared, true);
+        assert_eq!(
+            manager.id_map[&SoundType::ResultBgmClear],
+            manager.id_map[&SoundType::ResultClear]
+        );
+        assert_ne!(manager.id_map[&SoundType::ResultBgmAAA], manager.id_map[&SoundType::ResultAAA]);
+        assert!(!manager.is_bgm(SoundType::ResultClear));
+        manager.play(SoundType::ResultClear, 1.0);
+        assert!(render(&mut processor, 0, 1)[0] != 0.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn decoded_playback_classifies_plain_loop_and_decide_and_rejects_stale_analysis() {
         let root = test_temp_dir("decoded-volume-role");
@@ -926,10 +1000,7 @@ mod tests {
                 SoundType::ResultAA,
                 SoundType::ResultAAA,
             ] {
-                assert_eq!(
-                    prepared.samples.iter().find(|(s, _, _)| *s == sound).unwrap().2.frames.len(),
-                    expected_frames
-                );
+                assert_eq!(prepared.frames_for(sound), Some(expected_frames));
                 assert!(!prepared.looping_sounds.contains(&sound));
                 assert!(!prepared.normalization_paths.contains_key(&sound));
             }
@@ -1031,11 +1102,6 @@ mod tests {
         assert!(faded[0] > 0.0);
         assert_eq!(&faded[4..], &[0.0; 4]);
     }
-    use bmz_audio::command::CommandedAudioEngine;
-    use bmz_audio::engine::AudioEngine;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use super::*;
 
     #[test]
     fn new_succeeds_with_empty_selection_and_registers_no_samples() {
@@ -1170,7 +1236,7 @@ mod tests {
             Some(fingerprint),
         );
         assert!(!changed.reused_existing_sound_set);
-        assert_eq!(changed.stats.decoded_count, 3);
+        assert_eq!(changed.stats.decoded_count, 2, "plain clear is shared by BGM and SE types");
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1341,13 +1407,12 @@ mod tests {
             (SoundType::ResultAAA, 2),
             (SoundType::ResultA, 6),
         ] {
-            let sample = prepared.samples.iter().find(|(kind, _, _)| *kind == sound).unwrap();
-            assert_eq!(sample.2.frames.len(), expected_frames);
+            assert_eq!(prepared.frames_for(sound), Some(expected_frames));
             assert!(!prepared.looping_sounds.contains(&sound));
         }
-        assert!(!prepared.samples.iter().any(|(sound, _, _)| *sound == SoundType::ResultBgmFail));
-        assert!(!prepared.samples.iter().any(|(sound, _, _)| *sound == SoundType::ResultBgmClear));
-        assert!(!prepared.samples.iter().any(|(sound, _, _)| *sound == SoundType::ResultAA));
+        for sound in [SoundType::ResultBgmFail, SoundType::ResultBgmClear, SoundType::ResultAA] {
+            assert_eq!(prepared.frames_for(sound), None);
+        }
         assert_eq!(prepared.stats.analysis_count, 0, "plain Result sources are SE");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1375,15 +1440,7 @@ mod tests {
 
         let prepared = SystemSoundManager::prepare(&selection, true, 48_000, None);
 
-        let frames_for = |kind| {
-            prepared
-                .samples
-                .iter()
-                .find_map(|(sound_type, _, sample)| {
-                    (*sound_type == kind).then_some(sample.frames.len())
-                })
-                .unwrap()
-        };
+        let frames_for = |kind| prepared.frames_for(kind).unwrap();
         assert_eq!(frames_for(SoundType::Scratch), 3, "broken child should fall back to parent");
         assert_eq!(frames_for(SoundType::ResultBgmClear), 2, "child plain file beats parent loop");
         assert_eq!(frames_for(SoundType::ResultBgmAAA), 5, "rank BGM can come from parent");
@@ -1394,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_result_bgm_loops_only_with_suffix_and_stops_without_stopping_se() {
+    fn prepared_result_bgm_loops_only_with_suffix_and_keeps_distinct_se_playing() {
         let root = test_temp_dir("result-loop");
         std::fs::create_dir_all(&root).unwrap();
         write_test_wav(&root.join("clear.loop.wav"), 2);
@@ -1436,10 +1493,10 @@ mod tests {
         manager.stop_all_bgm();
         assert_eq!(render(&mut processor, 16, 2), first);
         manager.stop(SoundType::ResultClear);
+        // 同じaaa.wavを共有するため、通常RESULTとして停止すると互換SEとしての再生も止まる。
         manager.play(SoundType::ResultAAA, 1.0);
         manager.stop_all_bgm();
-        assert_eq!(render(&mut processor, 18, 2), first);
-        assert_eq!(render(&mut processor, 20, 2), vec![0.0; 4]);
+        assert_eq!(render(&mut processor, 18, 2), vec![0.0; 4]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1651,6 +1708,7 @@ mod tests {
             normalization_keys: HashMap::new(),
             source_fingerprint: None,
             samples: Vec::new(),
+            shared_sample_ids: Vec::new(),
             looping_sounds: HashSet::new(),
             bgm_sounds: HashSet::from([SoundType::Select]),
             bgm_normalization_gains: HashMap::from([(SoundType::Select, 0.25)]),

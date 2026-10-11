@@ -595,6 +595,8 @@ fn pick_random(paths: &[PathBuf]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn explicit_entry_and_loop_files_are_discovered_case_insensitively() {
         let dir = temp_dir("enter-loop-only");
@@ -622,7 +624,6 @@ mod tests {
         assert_eq!(fallback.resolve(SoundType::ResultEnterAAA), Some(dir.join("AAA.ENTER.WAV")));
         std::fs::remove_dir_all(dir).unwrap();
     }
-    use super::*;
 
     fn temp_dir(label: &str) -> PathBuf {
         let stamp =

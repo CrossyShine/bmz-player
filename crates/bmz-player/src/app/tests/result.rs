@@ -85,22 +85,15 @@ fn course_entry_keeps_legacy_fallback_and_uses_only_course_bgm() {
 }
 
 #[test]
-fn entry_se_and_course_bgm_use_separate_profile_volumes() {
-    use crate::system_sound::SoundType;
+fn system_sound_volume_uses_bgm_or_se_profile_volume_by_decoded_role() {
+    // 音種ごとのBGM/SE区分はSystemSoundManagerのデコード結果で決まり、
+    // system_sound_managerのテストで検証する。ここではprofile音量への対応だけを確認する。
     let mut mix = ProfileConfig::new_default("default", "Default", 1).audio_mix;
     mix.master_volume = 50;
     mix.system_se_volume = 80;
     mix.system_bgm_volume = 20;
-    for sound in SoundType::RESULT_ENTERS.into_iter().chain([SoundType::SelectEnter]) {
-        assert!(!sound.loops());
-        assert_eq!(system_sound_volume_from_mix(&mix, false), 0.4);
-    }
-    for sound in SoundType::RESULT_BGMS.into_iter().chain([SoundType::Select]) {
-        assert_eq!(
-            system_sound_volume_from_mix(&mix, sound.loops()),
-            if sound.loops() { 0.1 } else { 0.4 }
-        );
-    }
+    assert_eq!(system_sound_volume_from_mix(&mix, false), 0.4);
+    assert_eq!(system_sound_volume_from_mix(&mix, true), 0.1);
 }
 
 #[cfg(target_os = "windows")]
