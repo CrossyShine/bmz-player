@@ -49,3 +49,25 @@ COURSE RESULTではcourse専用入場音がなければ、サウンドセット�
 `cargo test -p bmz-player --locked`成功（2,346件成功、失敗0件、21件ignore）。
 全体テストは既存のローカル模擬通信のためサンドボックス外で実行した。
 生ログはGit管理外の`.local/system-sound-followup-tests.log`へ保存。
+
+## 追加仕様: 再生方式による音量分類
+
+2026-10-11追記。デコードに成功した候補のループ設定に基づいてBGM区分を保持する。
+ループと単発decideのみBGM音量・正規化を使用し、通常名のRESULTを含むその他の単発はSE音量を使用する。
+SoundTypeの旧is_bgmは探索・停止用のis_scene_musicへ変更し、音量計算はmanagerの適用済み分類を参照する。
+正規化OFF→ONの解析には適用済みBGMパスだけを渡し、解析結果適用時には分類の一致も確認する。
+停止・フェード対象は音量分類から独立させ、単発RESULTも停止対象に維持する。
+明示的な.enterがある通常RESULTはループBGMのみ併用し、旧形式の単発は重ねない。
+譜面・プレビュー・スキン音声の音量仕様は変更しない。
+
+追加テストは実デコードによる単発/ループ/decide分類、探索元に依存しないSE分類、
+単発RESULTの正規化除外、リアルタイム音量・正規化切替、古い解析結果の拒否、単発RESULT停止、
+入場SEとループのフェードと不要な二重再生防止を確認する。
+旧仕様のテストを新しい音量区分へ更新した。
+
+分類変更の検証: fmt、bmz-playerのcheck / all-targets Clippy成功。
+`cargo test -p bmz-player --locked`成功（2,348件成功、失敗0件、21件ignore）。
+公開SoundType APIの整理に伴い、workspace全体のcheck / all-targets Clippyも成功。
+`cargo test --workspace --locked --no-fail-fast`も成功。
+全体テストの生ログは`.local/system-sound-classification-tests.log`と
+`.local/system-sound-classification-workspace-tests.log`へ保存する（Git管理外）。

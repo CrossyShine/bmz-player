@@ -209,6 +209,12 @@ impl WinitApp {
                     finished.summary.ex_score,
                     finished.summary.total_notes,
                     |sound| self.system_sound_has(sound),
+                    |sound| {
+                        self.audio
+                            .system_sound
+                            .as_ref()
+                            .is_some_and(|manager| manager.is_bgm(sound))
+                    },
                 ) {
                     self.play_system_sound(sound);
                 }
@@ -246,7 +252,10 @@ impl WinitApp {
         if let Some(manager) = &self.audio.system_sound {
             manager.play_with_master_gain(
                 sound_type,
-                system_sound_volume_from_mix(&self.boot.profile_config.audio_mix, sound_type),
+                system_sound_volume_from_mix(
+                    &self.boot.profile_config.audio_mix,
+                    manager.is_bgm(sound_type),
+                ),
                 1.0,
             );
             self.start_audio_output_stream();
@@ -289,7 +298,7 @@ impl WinitApp {
         self.audio.system_sound.as_ref().map(|manager| {
             manager.gameplay_output(system_sound_volume_from_mix(
                 &self.boot.profile_config.audio_mix,
-                crate::system_sound::SoundType::Landmine,
+                manager.is_bgm(crate::system_sound::SoundType::Landmine),
             ))
         })
     }

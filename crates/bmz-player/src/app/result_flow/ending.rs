@@ -359,7 +359,10 @@ impl WinitApp {
         );
         manager.play_with_master_gain_and_fade_out(
             sound_type,
-            system_sound_volume_from_mix(&self.boot.profile_config.audio_mix, sound_type),
+            system_sound_volume_from_mix(
+                &self.boot.profile_config.audio_mix,
+                manager.is_bgm(sound_type),
+            ),
             1.0,
             fade_out_frames,
         );

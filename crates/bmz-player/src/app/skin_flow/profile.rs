@@ -14,7 +14,7 @@ impl WinitApp {
                 Instant::now(),
             );
             manager.refresh_volumes(|sound_type| {
-                let volume = system_sound_volume_from_mix(&mix, sound_type);
+                let volume = system_sound_volume_from_mix(&mix, manager.is_bgm(sound_type));
                 if sound_type == crate::system_sound::SoundType::Select {
                     volume * (1.0 - preview_factor).clamp(0.0, 1.0)
                 } else {

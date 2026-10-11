@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use bmz_core::judge::Judge;
 
 /// beatoraja の `SystemSoundManager.SoundType` と対応する列挙体。
-/// `path` は beatoraja 既定のファイル名、`is_bgm` は BGM セット探索対象かどうか。
+/// ファイル名と探索・停止の役割を表す。音量区分はデコード済み音源の再生方式で決定する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SoundType {
     Scratch,
@@ -50,7 +50,8 @@ pub enum SoundType {
     Decide,
     /// 地雷ノーツを踏んだときの固定 SE (beatoraja の `defaultsound/landmine.wav` 相当)。
     Landmine,
-    /// サウンドセット内のRESULT専用BGM。従来のclear/fail SEとは別の音種。
+    /// サウンドセット内の優先RESULT音源。通常名は単発SE、`.loop`はループBGM。
+    /// 補完用clear/fail SEとは選択・停止の役割を分ける。
     ResultBgmClear,
     ResultBgmFail,
     ResultBgmA,
@@ -196,7 +197,7 @@ impl SoundType {
     }
 
     /// BGM セット探索とシーン遷移時の停止対象かどうか。
-    pub fn is_bgm(&self) -> bool {
+    pub fn is_scene_music(&self) -> bool {
         matches!(self, SoundType::Select | SoundType::Decide) || self.is_result_bgm()
     }
 
@@ -403,8 +404,10 @@ impl SoundSetIndex {
         if sound_type.is_result_bgm() {
             return candidates;
         }
-        let fallback_layers =
-            [(!sound_type.is_bgm()).then_some(self.se.as_ref()).flatten(), self.default.as_ref()];
+        let fallback_layers = [
+            (!sound_type.is_scene_music()).then_some(self.se.as_ref()).flatten(),
+            self.default.as_ref(),
+        ];
         for layer in fallback_layers.into_iter().flatten() {
             if sound_type == SoundType::Select {
                 candidates.extend(
@@ -632,24 +635,24 @@ mod tests {
 
     #[test]
     fn sound_type_classification() {
-        assert!(SoundType::Select.is_bgm());
-        assert!(SoundType::Decide.is_bgm());
+        assert!(SoundType::Select.is_scene_music());
+        assert!(SoundType::Decide.is_scene_music());
         assert!(SoundType::Select.loops());
         assert!(!SoundType::Decide.loops());
-        assert!(!SoundType::Scratch.is_bgm());
+        assert!(!SoundType::Scratch.is_scene_music());
         assert_eq!(SoundType::Scratch.file_name(), "scratch.wav");
         assert_eq!(SoundType::ResultClear.file_name(), "clear.wav");
         assert_eq!(SoundType::Landmine.file_name(), "landmine.wav");
-        assert!(!SoundType::Landmine.is_bgm());
+        assert!(!SoundType::Landmine.is_scene_music());
         for sound in SoundType::RESULT_BGMS {
-            assert!(sound.is_bgm());
+            assert!(sound.is_scene_music());
             assert_eq!(
                 sound.loops(),
                 matches!(sound, SoundType::CourseBgmClear | SoundType::CourseBgmFail)
             );
         }
         for sound in [SoundType::ResultA, SoundType::ResultAA, SoundType::ResultAAA] {
-            assert!(!sound.is_bgm());
+            assert!(!sound.is_scene_music());
             assert!(!sound.loops());
         }
     }
@@ -1010,7 +1013,7 @@ mod tests {
             se_dir: Some(se.clone()),
             default_dir: Some(default.clone()),
         };
-        for sound in SoundType::ALL.into_iter().filter(|sound| !sound.is_bgm()) {
+        for sound in SoundType::ALL.into_iter().filter(|sound| !sound.is_scene_music()) {
             let name = sound.file_name();
             for dir in [&bgm, &se, &default] {
                 std::fs::write(dir.join(name), b"fixture").unwrap();

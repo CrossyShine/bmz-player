@@ -298,11 +298,12 @@ pub(super) fn result_entry_sounds(
     ex_score: u32,
     total_notes: u32,
     has_sound: impl Fn(crate::system_sound::SoundType) -> bool,
+    is_bgm: impl Fn(crate::system_sound::SoundType) -> bool,
 ) -> Vec<crate::system_sound::SoundType> {
     let sound = result_entry_sound_for_result(clear, ex_score, total_notes, &has_sound);
     let enter = result_explicit_enter_sound(clear, ex_score, total_notes, has_sound);
     let mut sounds = enter.into_iter().collect::<Vec<_>>();
-    if enter.is_none() || sound.is_bgm() {
+    if enter.is_none() || is_bgm(sound) {
         sounds.push(sound);
     }
     sounds
@@ -454,9 +455,9 @@ pub(super) fn system_sound_selection_from_catalog(
 
 pub(super) fn system_sound_volume_from_mix(
     mix: &crate::config::profile_config::AudioMixConfig,
-    sound_type: crate::system_sound::SoundType,
+    is_bgm: bool,
 ) -> f32 {
-    let unit = if sound_type.is_bgm() { mix.system_bgm_volume } else { mix.system_se_volume };
+    let unit = if is_bgm { mix.system_bgm_volume } else { mix.system_se_volume };
     let volume = crate::config::play::volume_unit_to_f32(mix.master_volume)
         * crate::config::play::volume_unit_to_f32(unit);
     volume.clamp(0.0, 1.0)

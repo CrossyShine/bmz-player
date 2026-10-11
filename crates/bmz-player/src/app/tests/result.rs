@@ -1,6 +1,30 @@
 use super::*;
 
 #[test]
+fn explicit_enter_replaces_plain_result_se_but_coexists_with_loop() {
+    use crate::system_sound::SoundType::*;
+    let available = |s| [ResultEnterClear, ResultBgmClear, ResultClear].contains(&s);
+    assert_eq!(
+        result_entry_sounds(ClearType::Normal, 0, 0, available, |_| false),
+        vec![ResultEnterClear]
+    );
+    assert_eq!(
+        result_entry_sounds(ClearType::Normal, 0, 0, available, |s| s == ResultBgmClear),
+        vec![ResultEnterClear, ResultBgmClear]
+    );
+    assert_eq!(
+        result_entry_sounds(
+            ClearType::Normal,
+            0,
+            0,
+            |s| [ResultBgmClear, ResultClear].contains(&s),
+            |_| false
+        ),
+        vec![ResultBgmClear]
+    );
+}
+
+#[test]
 fn explicit_result_enter_and_bgm_have_independent_rank_fallbacks() {
     use crate::system_sound::SoundType::*;
     for (score, enter, bgm) in [
@@ -9,7 +33,13 @@ fn explicit_result_enter_and_bgm_have_independent_rank_fallbacks() {
         (600, ResultEnterA, ResultBgmA),
     ] {
         let sounds = |available: &[crate::system_sound::SoundType]| {
-            result_entry_sounds(ClearType::Normal, score, 450, |s| available.contains(&s))
+            result_entry_sounds(
+                ClearType::Normal,
+                score,
+                450,
+                |s| available.contains(&s),
+                |s| s.is_result_bgm(),
+            )
         };
         assert_eq!(sounds(&[enter, bgm, ResultClear]), vec![enter, bgm]);
         assert_eq!(sounds(&[enter, ResultBgmClear]), vec![enter, ResultBgmClear]);
@@ -19,13 +49,17 @@ fn explicit_result_enter_and_bgm_have_independent_rank_fallbacks() {
         assert_eq!(sounds(&[ResultClear]), vec![ResultClear]);
     }
     assert_eq!(
-        result_entry_sounds(ClearType::Normal, 800, 450, |s| {
-            [ResultEnterAA, ResultBgmAA, ResultEnterClear, ResultBgmClear].contains(&s)
-        }),
+        result_entry_sounds(
+            ClearType::Normal,
+            800,
+            450,
+            |s| { [ResultEnterAA, ResultBgmAA, ResultEnterClear, ResultBgmClear].contains(&s) },
+            |s| s.is_result_bgm()
+        ),
         vec![ResultEnterClear, ResultBgmClear]
     );
     assert_eq!(
-        result_entry_sounds(ClearType::Failed, 900, 450, |_| true),
+        result_entry_sounds(ClearType::Failed, 900, 450, |_| true, |s| s.is_result_bgm()),
         vec![ResultEnterFail, ResultBgmFail]
     );
 }
@@ -58,10 +92,14 @@ fn entry_se_and_course_bgm_use_separate_profile_volumes() {
     mix.system_se_volume = 80;
     mix.system_bgm_volume = 20;
     for sound in SoundType::RESULT_ENTERS.into_iter().chain([SoundType::SelectEnter]) {
-        assert_eq!(system_sound_volume_from_mix(&mix, sound), 0.4);
+        assert!(!sound.loops());
+        assert_eq!(system_sound_volume_from_mix(&mix, false), 0.4);
     }
     for sound in SoundType::RESULT_BGMS.into_iter().chain([SoundType::Select]) {
-        assert_eq!(system_sound_volume_from_mix(&mix, sound), 0.1);
+        assert_eq!(
+            system_sound_volume_from_mix(&mix, sound.loops()),
+            if sound.loops() { 0.1 } else { 0.4 }
+        );
     }
 }
 
