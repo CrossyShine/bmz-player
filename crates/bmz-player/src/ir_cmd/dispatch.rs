@@ -46,6 +46,7 @@ pub async fn run_ir_command_with_paths_and_profile(
         }
         IrCommand::DownloadScores { provider, limit, dry_run } => {
             download_scores(
+                app_paths,
                 &profile_paths,
                 &profile,
                 IrScoreDownloadOptions { provider, limit, dry_run },

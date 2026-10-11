@@ -44,6 +44,8 @@ pub struct IrScoreDownloadReport {
     pub skipped_existing: u32,
     pub failed: u32,
     pub limit_reached: bool,
+    /// 中断要求により途中で止めた場合に true。取り込み済みの分は保存されている。
+    pub cancelled: bool,
     pub messages: Vec<String>,
 }
 
@@ -75,6 +77,35 @@ pub async fn download_ir_scores(
     options: &IrScoreDownloadOptions,
     now: i64,
 ) -> Result<IrScoreDownloadReport> {
+    download_ir_scores_with_hooks(
+        client,
+        provider_key,
+        account_id,
+        score_db,
+        network_db,
+        options,
+        now,
+        &mut |_| {},
+        None,
+    )
+    .await
+}
+
+/// `download_ir_scores` に、ページ取り込みごとの通知と中断要求を足した版。
+///
+/// 中断はページ取得前と取得待ち中に確認する。取り込み中のページは最後まで処理するため、
+/// 中断後も保存済みの状態は常にページ単位で整合する。
+pub async fn download_ir_scores_with_hooks(
+    client: &IrOwnScoreHistoryClient,
+    provider_key: &str,
+    account_id: &str,
+    score_db: &mut ScoreDatabase,
+    network_db: &NetworkDatabase,
+    options: &IrScoreDownloadOptions,
+    now: i64,
+    on_page: &mut dyn FnMut(&IrScoreDownloadReport),
+    cancel: Option<&tokio::sync::watch::Receiver<bool>>,
+) -> Result<IrScoreDownloadReport> {
     let limit = options.limit.max(1);
     let mut report = IrScoreDownloadReport {
         provider_key: provider_key.to_string(),
@@ -84,14 +115,26 @@ pub async fn download_ir_scores(
     let mut cursor = None;
 
     while report.action_count() < limit {
+        if cancel.is_some_and(|cancel| *cancel.borrow()) {
+            report.cancelled = true;
+            break;
+        }
         let page_limit = 100;
-        let page = client
-            .fetch(&IrOwnScoreHistoryRequest {
-                limit: page_limit,
-                offset: 0,
-                cursor: cursor.clone(),
-            })
-            .await?;
+        let request =
+            IrOwnScoreHistoryRequest { limit: page_limit, offset: 0, cursor: cursor.clone() };
+        let page = match cancel {
+            Some(cancel) => {
+                let mut cancel = cancel.clone();
+                tokio::select! {
+                    page = client.fetch(&request) => page?,
+                    true = async { cancel.wait_for(|requested| *requested).await.is_ok() } => {
+                        report.cancelled = true;
+                        break;
+                    }
+                }
+            }
+            None => client.fetch(&request).await?,
+        };
         report.pages += 1;
         if page.scores.is_empty() {
             break;
@@ -108,6 +151,7 @@ pub async fn download_ir_scores(
             &mut report,
             Some(limit),
         )?;
+        on_page(&report);
 
         if consumed < page.scores.len() {
             report.limit_reached = true;

@@ -70,19 +70,3 @@ fn sync_ir_rivals_keeps_manual_entries() {
     assert_eq!(profile.rival.entries.len(), 1);
     assert_eq!(profile.rival.entries[0].id, "local-1");
 }
-
-#[test]
-fn full_upload_stops_without_sync_progress() {
-    assert!(ensure_full_upload_progress(&IrSyncReport::default(), 0).is_err());
-    assert!(
-        ensure_full_upload_progress(&IrSyncReport { submitted: 1, ..Default::default() }, 1,)
-            .is_ok()
-    );
-    assert!(
-        ensure_full_upload_progress(
-            &IrSyncReport { submitted: 1, failed: 1, ..Default::default() },
-            1,
-        )
-        .is_err()
-    );
-}

@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod device_key;
 pub mod download;
 mod http_error;
+pub mod manual;
 pub mod payload;
 pub mod provider;
 pub mod provider_key;

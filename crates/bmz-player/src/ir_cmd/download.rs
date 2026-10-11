@@ -1,6 +1,9 @@
+use super::output::{no_cancel, print_progress};
 use super::*;
+use crate::ir::manual::{IrSyncContext, download_scores as download_scores_manual};
 
 pub(super) async fn download_scores(
+    app_paths: &AppPaths,
     profile_paths: &ProfilePaths,
     profile: &ProfileConfig,
     options: IrScoreDownloadOptions,
@@ -8,39 +11,19 @@ pub(super) async fn download_scores(
     crate::storage::migration::migrate_score_db(&profile_paths.score_db)?;
     crate::storage::migration::migrate_network_db(&profile_paths.network_db)?;
 
-    let provider = selected_provider(profile, options.provider.as_deref())?.clone();
-    let provider_key = crate::ir::provider_key::configured_provider_key(&provider)
-        .context("IR provider key is not set; log in again")?
-        .to_string();
-    let credentials = ensure_fresh_credentials(
-        profile_paths.root_dir.as_path(),
-        &provider_key,
-        &provider.base_url,
-        now_unix_seconds(),
-    )
-    .await?;
-    let client = if crate::ir::bms_ir::is_bms_ir_config(&provider) {
-        crate::ir::download::IrOwnScoreHistoryClient::BmsIr {
-            client: crate::ir::bms_ir::BmsIrClient::new(&provider.base_url)?,
-            player_id: credentials.account_id.clone(),
-            game_token: credentials.access_token,
-        }
-    } else {
-        crate::ir::download::IrOwnScoreHistoryClient::BmzOfficial(BmzOfficialIrClient::new(
-            &provider.base_url,
-            credentials.access_token,
-        )?)
+    let ctx = IrSyncContext {
+        score_db: &profile_paths.score_db,
+        profile_root: profile_paths.root_dir.as_path(),
+        logs_dir: app_paths.logs_dir.as_path(),
+        ir_config: &profile.ir,
     };
-    let mut score_db = ScoreDatabase::open(&profile_paths.score_db)?;
-    let network_db = NetworkDatabase::open(&profile_paths.network_db)?;
-    let report = download_ir_scores(
-        &client,
-        &provider_key,
-        &credentials.account_id,
-        &mut score_db,
-        &network_db,
+    let (_keep_alive, cancel) = no_cancel();
+    let report = download_scores_manual(
+        &ctx,
+        &profile_paths.network_db,
         &options,
-        now_unix_seconds(),
+        &mut |event| print_progress(&event),
+        &cancel,
     )
     .await?;
 
@@ -73,56 +56,7 @@ pub(super) fn selected_provider<'a>(
     profile: &'a ProfileConfig,
     requested: Option<&str>,
 ) -> Result<&'a IrProviderConfig> {
-    if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
-        let provider = profile
-            .ir
-            .providers
-            .iter()
-            .find(|entry| {
-                entry.provider == requested
-                    || crate::ir::provider_key::configured_provider_key(entry)
-                        .is_some_and(|provider_key| provider_key == requested)
-            })
-            .with_context(|| format!("IR provider is not configured: {requested}"))?;
-        if !provider.enabled {
-            bail!("IR provider '{}' is disabled", provider.provider);
-        }
-        if provider.base_url.trim().is_empty() {
-            bail!("IR provider '{}' has no base_url; run `bmz ir login` first", provider.provider);
-        }
-        if crate::ir::provider_key::configured_provider_key(provider).is_none() {
-            bail!(
-                "IR provider '{}' has no provider key; run `bmz ir login` first",
-                provider.provider
-            );
-        }
-        return Ok(provider);
-    }
-
-    let provider_name = if profile.ir.primary_provider.is_empty() {
-        profile
-            .ir
-            .providers
-            .iter()
-            .find(|entry| {
-                entry.enabled && crate::ir::provider_key::configured_provider_key(entry).is_some()
-            })
-            .and_then(crate::ir::provider_key::configured_provider_key)
-            .map(str::to_string)
-            .unwrap_or_default()
-    } else {
-        profile.ir.primary_provider.clone()
-    };
-    profile
-        .ir
-        .providers
-        .iter()
-        .find(|entry| {
-            !entry.base_url.is_empty()
-                && crate::ir::provider_key::configured_provider_key(entry)
-                    .is_some_and(|provider_key| provider_key == provider_name)
-        })
-        .context("no read-capable IR provider configured")
+    crate::ir::manual::selected_provider(&profile.ir, requested)
 }
 
 pub(super) fn parse_scope(value: &str) -> Result<IrRankingScope> {
@@ -149,8 +83,5 @@ pub(super) fn prompt_password() -> Result<String> {
 }
 
 pub(super) fn now_unix_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    crate::ir::manual::now_unix_seconds()
 }
