@@ -464,6 +464,79 @@ impl NetworkDatabase {
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
+    /// 送信キューの一覧。`payload_json` を読まない軽量版。
+    ///
+    /// 並びは status の重要度（failed → sending → pending → succeeded）、
+    /// 次に `updated_at` の新しい順、最後に `id` の新しい順。
+    /// ユーザーが対処すべき失敗を先頭に固定し、同順位内は直近に動いたものを上にする。
+    /// `updated_at` が同値でも `id` で全順序になるため、offset によるページングで
+    /// 行の重複・欠落が起きない。
+    pub fn list_ir_score_jobs(
+        &self,
+        filter: &IrScoreJobListFilter<'_>,
+    ) -> Result<Vec<IrScoreJobSummary>> {
+        let (where_sql, mut values) = ir_score_job_filter_sql(filter);
+        let sql = format!(
+            "SELECT id, provider, account_id, local_score_id, chart_sha256, ln_policy,
+                status, attempt_count, next_attempt_at, last_error, created_at, updated_at, kind
+             FROM ir_score_jobs
+             WHERE {where_sql}
+             ORDER BY CASE status
+                          WHEN 'failed' THEN 0
+                          WHEN 'sending' THEN 1
+                          WHEN 'pending' THEN 2
+                          ELSE 3
+                      END ASC,
+                      updated_at DESC, id DESC
+             LIMIT ? OFFSET ?"
+        );
+        values.push(rusqlite::types::Value::Integer(i64::from(filter.limit)));
+        values.push(rusqlite::types::Value::Integer(i64::from(filter.offset)));
+        let mut stmt = self.conn.prepare(&sql)?;
+        stmt.query_map(params_from_iter(values), ir_score_job_summary_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// `list_ir_score_jobs` と同じ絞り込みの総件数（limit / offset は無視する）。
+    pub fn count_ir_score_jobs(&self, filter: &IrScoreJobListFilter<'_>) -> Result<u32> {
+        let (where_sql, values) = ir_score_job_filter_sql(filter);
+        let sql = format!("SELECT COUNT(*) FROM ir_score_jobs WHERE {where_sql}");
+        let count: i64 = self.conn.query_row(&sql, params_from_iter(values), |row| row.get(0))?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    /// status別のjob数。`provider` / `account_id` が `None` なら絞り込まない。
+    pub fn ir_score_job_status_counts(
+        &self,
+        provider: Option<&str>,
+        account_id: Option<&str>,
+    ) -> Result<IrScoreJobStatusCounts> {
+        let mut stmt = self.conn.prepare(
+            "SELECT status, COUNT(*)
+             FROM ir_score_jobs
+             WHERE (?1 IS NULL OR provider = ?1)
+               AND (?2 IS NULL OR account_id = ?2)
+             GROUP BY status",
+        )?;
+        let rows = stmt.query_map(params![provider, account_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = IrScoreJobStatusCounts::default();
+        for row in rows {
+            let (status, count) = row?;
+            let count = u32::try_from(count).unwrap_or(u32::MAX);
+            match status.as_str() {
+                "pending" => counts.pending = count,
+                "sending" => counts.sending = count,
+                "failed" => counts.failed = count,
+                "succeeded" => counts.succeeded = count,
+                _ => {}
+            }
+        }
+        Ok(counts)
+    }
+
     /// 成功済み単曲scoreのremote idから、後付け署名用jobを重複なく投入する。
     pub fn enqueue_ir_score_attestation_jobs(
         &mut self,
@@ -858,5 +931,34 @@ impl NetworkDatabase {
         Ok(report)
     }
 }
-use super::rows::{ir_score_job_from_row, sql_placeholders};
+use super::rows::{ir_score_job_from_row, ir_score_job_summary_from_row, sql_placeholders};
 use super::*;
+
+fn ir_score_job_filter_sql(
+    filter: &IrScoreJobListFilter<'_>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    if let Some(provider) = filter.provider {
+        clauses.push("provider = ?".to_string());
+        values.push(Value::Text(provider.to_string()));
+    }
+    if let Some(account_id) = filter.account_id {
+        clauses.push("account_id = ?".to_string());
+        values.push(Value::Text(account_id.to_string()));
+    }
+    if !filter.kinds.is_empty() {
+        clauses.push(format!("kind IN ({})", sql_placeholders(filter.kinds.len())));
+        values.extend(filter.kinds.iter().map(|kind| Value::Text(kind.as_str().to_string())));
+    }
+    if filter.statuses.is_empty() {
+        clauses.push("status != 'succeeded'".to_string());
+    } else {
+        clauses.push(format!("status IN ({})", sql_placeholders(filter.statuses.len())));
+        values
+            .extend(filter.statuses.iter().map(|status| Value::Text(status.as_str().to_string())));
+    }
+    (clauses.join(" AND "), values)
+}

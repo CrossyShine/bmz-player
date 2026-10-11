@@ -215,3 +215,82 @@ async fn sleep_or_cancel_returns_early_on_cancel() {
     let (_tx, cancel) = tokio::sync::watch::channel(false);
     assert!(!sleep_or_cancel(Duration::from_millis(5), &cancel).await);
 }
+
+#[tokio::test]
+async fn resend_job_ignores_backoff_and_skips_a_job_being_sent() {
+    let fixture = Fixture::new("resend-one");
+    let mut db = open_network_db();
+    let failed = enqueue_unroutable_job(&mut db, 1);
+    let busy = enqueue_unroutable_job(&mut db, 2);
+    db.mark_ir_score_job_failed(failed, now_unix_seconds(), "boom", None).unwrap();
+    // 失敗直後なので通常のclaimでは待機中。
+    assert!(db.claim_pending_ir_score_jobs(now_unix_seconds(), 1, false).unwrap()[0].id == busy);
+
+    let report =
+        resend_job(&fixture.ctx(), &mut db, "unconfigured", "account-1", IrJobKind::Score, 1)
+            .await
+            .unwrap();
+    // 再送が実際に試行された（未設定providerなので再度失敗扱い）。
+    assert_eq!((report.targeted, report.failed, report.skipped_busy), (1, 1, 0));
+    let counts = db.ir_score_job_status_counts(None, None).unwrap();
+    assert_eq!(counts.failed, 1);
+
+    // sending中のjobは二重に送らない。
+    let report =
+        resend_job(&fixture.ctx(), &mut db, "unconfigured", "account-1", IrJobKind::Score, 2)
+            .await
+            .unwrap();
+    assert_eq!((report.failed, report.skipped_busy), (0, 1));
+}
+
+#[tokio::test]
+async fn resend_failed_jobs_only_targets_failed_jobs_and_can_be_cancelled() {
+    let fixture = Fixture::new("resend-bulk");
+    let mut db = open_network_db();
+    let failed_ids: Vec<i64> = (1..=3).map(|id| enqueue_unroutable_job(&mut db, id)).collect();
+    let pending = enqueue_unroutable_job(&mut db, 9);
+    for id in &failed_ids {
+        db.mark_ir_score_job_failed(*id, now_unix_seconds(), "boom", None).unwrap();
+    }
+
+    let (tx, cancel) = tokio::sync::watch::channel(false);
+    let mut finished = 0;
+    let report = resend_failed_jobs(
+        &fixture.ctx(),
+        &mut db,
+        "unconfigured",
+        "account-1",
+        &mut |event| {
+            if matches!(event, IrManualProgress::JobFinished { .. }) {
+                finished += 1;
+                if finished == 2 {
+                    tx.send_replace(true);
+                }
+            }
+        },
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.targeted, 3);
+    assert!(report.cancelled);
+    assert_eq!(report.failed, 2);
+
+    // pendingのjobは触らない。
+    let jobs = db.pending_ir_score_jobs(i64::MAX / 2, 10).unwrap();
+    assert!(jobs.iter().any(|job| job.id == pending && job.status == "pending"));
+
+    // 中断なしなら残りも含めて全件が対象になる。
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let report = resend_failed_jobs(
+        &fixture.ctx(),
+        &mut db,
+        "unconfigured",
+        "account-1",
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!((report.targeted, report.failed, report.cancelled), (3, 3, false));
+}

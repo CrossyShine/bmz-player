@@ -27,7 +27,8 @@ mod rows;
 
 pub use model::{
     IrJobKind, IrLocalScoreCleanupReport, IrRivalScoreCacheState, IrRivalScoreRecord,
-    IrScoreJobRecord, IrSubmittedScoreLink, NewIrScoreJob, NewIrScoreSubmission,
+    IrScoreJobListFilter, IrScoreJobRecord, IrScoreJobStatusCounts, IrScoreJobSummary,
+    IrSubmittedScoreLink, NewIrScoreJob, NewIrScoreSubmission,
 };
 
 #[cfg(test)]

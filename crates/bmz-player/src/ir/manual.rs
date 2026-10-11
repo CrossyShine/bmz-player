@@ -15,10 +15,12 @@ use crate::ir::backfill::IrLocalUploadReport;
 use crate::ir::download::IrScoreDownloadReport;
 
 mod download;
+mod resend;
 mod sync;
 mod upload;
 
 pub use download::download_scores;
+pub use resend::{IrManualResendReport, resend_failed_jobs, resend_job};
 pub use sync::{IrManualSyncOutcome, IrManualSyncScope, sync_jobs};
 pub use upload::{upload_local_all, upload_local_batch};
 

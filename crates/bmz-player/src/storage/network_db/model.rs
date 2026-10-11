@@ -56,6 +56,51 @@ pub struct IrScoreJobRecord {
     pub updated_at: i64,
 }
 
+/// 送信キュー一覧用の軽量レコード。重い `payload_json` は含めない。
+#[derive(Debug, Clone)]
+pub struct IrScoreJobSummary {
+    pub id: i64,
+    pub provider: String,
+    pub account_id: String,
+    pub kind: IrJobKind,
+    pub local_score_id: i64,
+    pub chart_sha256: [u8; 32],
+    pub ln_policy: LnScorePolicy,
+    pub status: String,
+    pub attempt_count: u32,
+    pub next_attempt_at: i64,
+    pub last_error: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// `list_ir_score_jobs` / `count_ir_score_jobs` の絞り込み条件。
+#[derive(Debug, Clone, Copy)]
+pub struct IrScoreJobListFilter<'a> {
+    pub provider: Option<&'a str>,
+    pub account_id: Option<&'a str>,
+    /// 空なら全kind。
+    pub kinds: &'a [IrJobKind],
+    /// 空なら `succeeded` 以外（キューに残っているもの）。
+    pub statuses: &'a [IrScoreJobStatus],
+    pub limit: u32,
+    pub offset: u32,
+}
+
+impl Default for IrScoreJobListFilter<'_> {
+    fn default() -> Self {
+        Self { provider: None, account_id: None, kinds: &[], statuses: &[], limit: 100, offset: 0 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IrScoreJobStatusCounts {
+    pub pending: u32,
+    pub sending: u32,
+    pub failed: u32,
+    pub succeeded: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewIrScoreJob {
     pub provider: String,

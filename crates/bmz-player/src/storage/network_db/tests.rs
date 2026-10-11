@@ -831,3 +831,139 @@ fn prune_succeeded_ir_score_jobs_keeps_recent_and_unfinished_jobs() {
         .unwrap();
     assert_eq!(stale_submission_count, 0);
 }
+
+fn enqueue_listed_job(
+    db: &mut NetworkDatabase,
+    provider: &str,
+    account_id: &str,
+    kind: IrJobKind,
+    local_score_id: i64,
+) -> i64 {
+    db.enqueue_ir_score_job(&NewIrScoreJob {
+        provider: provider.to_string(),
+        account_id: account_id.to_string(),
+        kind,
+        local_score_id,
+        chart_sha256: [local_score_id as u8; 32],
+        ln_policy: LnScorePolicy::ForceLn,
+        payload_json: format!(
+            "{{\"idempotency_key\":\"k{provider}{account_id}{local_score_id}\"}}"
+        ),
+        now: 10,
+    })
+    .unwrap()
+}
+
+#[test]
+fn list_ir_score_jobs_orders_by_status_then_recency_and_hides_succeeded() {
+    let mut db = open_network_db();
+    let pending = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 1);
+    let sending = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 2);
+    let failed_old = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 3);
+    let failed_new = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 4);
+    let done = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 5);
+    db.mark_ir_score_job_status(sending, IrScoreJobStatus::Sending, 20, "").unwrap();
+    db.mark_ir_score_job_failed(failed_old, 30, "old", None).unwrap();
+    db.mark_ir_score_job_failed(failed_new, 40, "new", None).unwrap();
+    db.mark_ir_score_job_status(done, IrScoreJobStatus::Succeeded, 50, "").unwrap();
+
+    let ids = |filter: &IrScoreJobListFilter<'_>| -> Vec<i64> {
+        db.list_ir_score_jobs(filter).unwrap().into_iter().map(|job| job.id).collect()
+    };
+    let default = IrScoreJobListFilter::default();
+    assert_eq!(ids(&default), [failed_new, failed_old, sending, pending]);
+    assert_eq!(db.count_ir_score_jobs(&default).unwrap(), 4);
+
+    let all = IrScoreJobListFilter {
+        statuses: &[
+            IrScoreJobStatus::Pending,
+            IrScoreJobStatus::Sending,
+            IrScoreJobStatus::Failed,
+            IrScoreJobStatus::Succeeded,
+        ],
+        ..default
+    };
+    assert_eq!(ids(&all), [failed_new, failed_old, sending, pending, done]);
+    let failed_only = IrScoreJobListFilter { statuses: &[IrScoreJobStatus::Failed], ..default };
+    assert_eq!(ids(&failed_only), [failed_new, failed_old]);
+
+    let job = &db.list_ir_score_jobs(&failed_only).unwrap()[0];
+    assert_eq!(job.last_error, "new");
+    assert_eq!(job.attempt_count, 1);
+}
+
+#[test]
+fn list_ir_score_jobs_filters_by_account_and_kind_and_pages_stably() {
+    let mut db = open_network_db();
+    let a1 = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 1);
+    let a2 = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 2);
+    let a3 = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Course, 3);
+    enqueue_listed_job(&mut db, "bmz", "b", IrJobKind::Score, 4);
+    enqueue_listed_job(&mut db, "other", "a", IrJobKind::Score, 5);
+
+    let scope = IrScoreJobListFilter {
+        provider: Some("bmz"),
+        account_id: Some("a"),
+        ..IrScoreJobListFilter::default()
+    };
+    // updated_at が全て同値でも id の降順で全順序になる。
+    let ids = |filter: &IrScoreJobListFilter<'_>| -> Vec<i64> {
+        db.list_ir_score_jobs(filter).unwrap().into_iter().map(|job| job.id).collect()
+    };
+    assert_eq!(ids(&scope), [a3, a2, a1]);
+    assert_eq!(db.count_ir_score_jobs(&scope).unwrap(), 3);
+    assert_eq!(ids(&IrScoreJobListFilter { kinds: &[IrJobKind::Course], ..scope }), [a3]);
+    assert_eq!(ids(&IrScoreJobListFilter { limit: 2, offset: 0, ..scope }), [a3, a2]);
+    assert_eq!(ids(&IrScoreJobListFilter { limit: 2, offset: 2, ..scope }), [a1]);
+    assert!(ids(&IrScoreJobListFilter { limit: 2, offset: 4, ..scope }).is_empty());
+}
+
+#[test]
+fn ir_score_job_status_counts_group_by_status() {
+    let mut db = open_network_db();
+    let a = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 1);
+    let b = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 2);
+    enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 3);
+    enqueue_listed_job(&mut db, "bmz", "b", IrJobKind::Score, 4);
+    db.mark_ir_score_job_failed(a, 20, "x", None).unwrap();
+    db.mark_ir_score_job_status(b, IrScoreJobStatus::Succeeded, 20, "").unwrap();
+
+    let counts = db.ir_score_job_status_counts(Some("bmz"), Some("a")).unwrap();
+    assert_eq!(counts, IrScoreJobStatusCounts { pending: 1, sending: 0, failed: 1, succeeded: 1 });
+    let everything = db.ir_score_job_status_counts(None, None).unwrap();
+    assert_eq!(everything.pending, 2);
+}
+
+#[test]
+fn failed_job_is_claimed_for_resend_despite_backoff_but_never_twice() {
+    let mut db = open_network_db();
+    let id = enqueue_listed_job(&mut db, "bmz", "a", IrJobKind::Score, 7);
+    db.mark_ir_score_job_failed(id, 100, "boom", None).unwrap();
+
+    // 通常のclaimはバックオフ中の失敗jobを拾わない。
+    assert!(
+        db.claim_pending_ir_score_job_for_local_score("bmz", "a", IrJobKind::Score, 7, 101, false)
+            .unwrap()
+            .is_empty()
+    );
+    // 手動再送（backoff無視）は拾う。
+    let claimed = db
+        .claim_pending_ir_score_job_for_local_score("bmz", "a", IrJobKind::Score, 7, 101, true)
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, id);
+    // sending中（lease内）は、backoff無視でも二重にclaimしない。
+    assert!(
+        db.claim_pending_ir_score_job_for_local_score("bmz", "a", IrJobKind::Score, 7, 102, true)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(db.claim_pending_ir_score_jobs(102, 10, true).unwrap().is_empty());
+    // lease（5分）が切れたら取り直せる。
+    assert_eq!(
+        db.claim_pending_ir_score_job_for_local_score("bmz", "a", IrJobKind::Score, 7, 500, true)
+            .unwrap()
+            .len(),
+        1
+    );
+}
