@@ -178,7 +178,7 @@ impl WinitApp {
         };
         let volume = system_sound_volume_from_mix(
             &self.boot.profile_config.audio_mix,
-            crate::system_sound::SoundType::Select,
+            manager.is_bgm(crate::system_sound::SoundType::Select),
         ) * factor.clamp(0.0, 1.0);
         manager.set_volume(crate::system_sound::SoundType::Select, volume);
     }

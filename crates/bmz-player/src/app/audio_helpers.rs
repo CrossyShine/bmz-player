@@ -21,6 +21,19 @@ pub(super) fn should_play_select_bgm_on_enter(
     !select_preview_playing && !system_sound_load_pending
 }
 
+pub(super) fn take_select_enter(
+    pending: &mut bool,
+    in_select: bool,
+    loading: bool,
+    ready: bool,
+    viewer_waiting: bool,
+) -> bool {
+    if !in_select || loading || !ready {
+        return false;
+    }
+    std::mem::take(pending) && !viewer_waiting
+}
+
 pub(super) fn should_shuffle_system_sound_sets_on_scene_enter(
     previous: Option<AppSceneKind>,
     next: AppSceneKind,
@@ -52,8 +65,9 @@ pub(super) fn system_bgm_stop_targets_on_scene_enter(
     scene_kind: AppSceneKind,
 ) -> &'static [crate::system_sound::SoundType] {
     use crate::system_sound::SoundType;
-    static PLAY: [SoundType; 6] = with_result_bgms([SoundType::Select]);
-    static NON_PLAY: [SoundType; 7] = with_result_bgms([SoundType::Select, SoundType::Decide]);
+    static PLAY: [SoundType; 9] = with_result_bgms([SoundType::Select, SoundType::SelectEnter]);
+    static NON_PLAY: [SoundType; 10] =
+        with_result_bgms([SoundType::Select, SoundType::SelectEnter, SoundType::Decide]);
     match scene_kind {
         AppSceneKind::Play => &PLAY,
         AppSceneKind::Select | AppSceneKind::Decide | AppSceneKind::Result => &NON_PLAY,
@@ -174,7 +188,14 @@ pub(super) fn decide_bgm_fade_out_frames(chart_zero_time: TimeUs, sample_rate: u
 
 pub(super) fn result_exit_system_sounds() -> &'static [crate::system_sound::SoundType] {
     use crate::system_sound::SoundType;
-    static SOUNDS: [SoundType; 14] = with_result_bgms([
+    static SOUNDS: [SoundType; 23] = with_result_bgms([
+        SoundType::ResultEnterClear,
+        SoundType::ResultEnterFail,
+        SoundType::ResultEnterA,
+        SoundType::ResultEnterAA,
+        SoundType::ResultEnterAAA,
+        SoundType::CourseEnterClear,
+        SoundType::CourseEnterFail,
         SoundType::ResultClear,
         SoundType::ResultFail,
         SoundType::ResultA,
@@ -241,6 +262,76 @@ pub(super) fn result_entry_sound_for_result(
         }
     }
     result_entry_sound_for_clear(clear)
+}
+
+/// 明示的な入場SEだけを独立して選ぶ。互換SEは呼び出し側でBGM優先にする。
+pub(super) fn result_explicit_enter_sound(
+    clear: bmz_core::clear::ClearType,
+    ex_score: u32,
+    total_notes: u32,
+    has_sound: impl Fn(crate::system_sound::SoundType) -> bool,
+) -> Option<crate::system_sound::SoundType> {
+    use crate::system_sound::SoundType;
+    let selected = result_entry_sound_for_result(clear, ex_score, total_notes, |sound| {
+        let enter = match sound {
+            SoundType::ResultBgmClear => SoundType::ResultEnterClear,
+            SoundType::ResultBgmFail => SoundType::ResultEnterFail,
+            SoundType::ResultBgmA => SoundType::ResultEnterA,
+            SoundType::ResultBgmAA => SoundType::ResultEnterAA,
+            SoundType::ResultBgmAAA => SoundType::ResultEnterAAA,
+            _ => return false,
+        };
+        has_sound(enter)
+    });
+    let enter = match selected {
+        SoundType::ResultBgmA => SoundType::ResultEnterA,
+        SoundType::ResultBgmAA => SoundType::ResultEnterAA,
+        SoundType::ResultBgmAAA => SoundType::ResultEnterAAA,
+        SoundType::ResultBgmFail | SoundType::ResultFail => SoundType::ResultEnterFail,
+        _ => SoundType::ResultEnterClear,
+    };
+    has_sound(enter).then_some(enter)
+}
+
+pub(super) fn result_entry_sounds(
+    clear: bmz_core::clear::ClearType,
+    ex_score: u32,
+    total_notes: u32,
+    has_sound: impl Fn(crate::system_sound::SoundType) -> bool,
+    is_bgm: impl Fn(crate::system_sound::SoundType) -> bool,
+) -> Vec<crate::system_sound::SoundType> {
+    let sound = result_entry_sound_for_result(clear, ex_score, total_notes, &has_sound);
+    let enter = result_explicit_enter_sound(clear, ex_score, total_notes, has_sound);
+    let mut sounds = enter.into_iter().collect::<Vec<_>>();
+    if enter.is_none() || is_bgm(sound) {
+        sounds.push(sound);
+    }
+    sounds
+}
+
+pub(super) fn course_result_entry_sounds(
+    clear: bmz_core::clear::ClearType,
+    has_sound: impl Fn(crate::system_sound::SoundType) -> bool,
+) -> Vec<crate::system_sound::SoundType> {
+    use crate::system_sound::SoundType;
+    let preferred = course_result_entry_sound_for_clear(clear);
+    let (enter, bgm) = if preferred == SoundType::CourseFail {
+        (SoundType::CourseEnterFail, SoundType::CourseBgmFail)
+    } else {
+        (SoundType::CourseEnterClear, SoundType::CourseBgmClear)
+    };
+    let se = if has_sound(enter) {
+        enter
+    } else if has_sound(preferred) {
+        preferred
+    } else {
+        result_entry_sound_for_clear(clear)
+    };
+    let mut sounds = vec![se];
+    if has_sound(bgm) {
+        sounds.push(bgm);
+    }
+    sounds
 }
 
 pub(super) fn should_apply_system_sound_load(
@@ -364,9 +455,9 @@ pub(super) fn system_sound_selection_from_catalog(
 
 pub(super) fn system_sound_volume_from_mix(
     mix: &crate::config::profile_config::AudioMixConfig,
-    sound_type: crate::system_sound::SoundType,
+    is_bgm: bool,
 ) -> f32 {
-    let unit = if sound_type.is_bgm() { mix.system_bgm_volume } else { mix.system_se_volume };
+    let unit = if is_bgm { mix.system_bgm_volume } else { mix.system_se_volume };
     let volume = crate::config::play::volume_unit_to_f32(mix.master_volume)
         * crate::config::play::volume_unit_to_f32(unit);
     volume.clamp(0.0, 1.0)

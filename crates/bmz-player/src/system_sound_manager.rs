@@ -56,7 +56,10 @@ pub struct PreparedSystemSoundSet {
     normalization_keys: HashMap<SoundType, LoudnessCacheKey>,
     source_fingerprint: Option<SystemSoundSourceFingerprint>,
     samples: Vec<(SoundType, SoundId, DecodedSample)>,
+    /// 同じ単発SE音源を共有する音種。デコード・登録を1回に抑え、IDだけを割り当てる。
+    shared_sample_ids: Vec<(SoundType, SoundId)>,
     looping_sounds: HashSet<SoundType>,
+    bgm_sounds: HashSet<SoundType>,
     bgm_normalization_gains: HashMap<SoundType, f32>,
     pub normalization_analysis_enabled: bool,
     pub(crate) reused_existing_sound_set: bool,
@@ -121,6 +124,7 @@ pub struct SystemSoundManager {
     engine: AudioEngineHandle,
     id_map: HashMap<SoundType, SoundId>,
     looping_sounds: HashSet<SoundType>,
+    bgm_sounds: HashSet<SoundType>,
     last_volumes: RefCell<HashMap<SoundType, f32>>,
     master_gain: Cell<f32>,
     bgm_normalization_gains: HashMap<SoundType, f32>,
@@ -211,7 +215,9 @@ impl SystemSoundManager {
                 normalization_keys: HashMap::new(),
                 source_fingerprint,
                 samples: Vec::new(),
+                shared_sample_ids: Vec::new(),
                 looping_sounds: HashSet::new(),
+                bgm_sounds: HashSet::new(),
                 bgm_normalization_gains: HashMap::new(),
                 normalization_analysis_enabled: normalize_bgm_volume,
                 reused_existing_sound_set: true,
@@ -226,7 +232,10 @@ impl SystemSoundManager {
         let mut normalization_keys = HashMap::new();
         let mut loader = FfmpegSampleLoader::default();
         let mut samples = Vec::new();
+        let mut shared_sample_ids = Vec::new();
+        let mut se_ids_by_path = HashMap::<PathBuf, SoundId>::new();
         let mut looping_sounds = HashSet::new();
+        let mut bgm_sounds = HashSet::new();
         let mut stats = SystemSoundPrepareStats::default();
         let cache_path = cache_dir.map(|dir| dir.join(SYSTEM_BGM_LOUDNESS_CACHE_FILE));
         let mut cache = cache_path.as_deref().map(load_loudness_cache).unwrap_or_default();
@@ -243,15 +252,27 @@ impl SystemSoundManager {
                 );
                 continue;
             }
+            let is_se = |candidate: &ResolvedSystemSound| {
+                !candidate.loop_playback && *sound_type != SoundType::Decide
+            };
             for candidate in candidates {
                 let path = candidate.path.clone();
+                // 通常RESULT音源はRESULT BGMと互換SEの両方で同じファイルに解決されうる。
+                // どちらも単発SEなので、同一サンプルを共有しても音量・正規化区分は変わらない。
+                if is_se(candidate)
+                    && let Some(&shared_id) = se_ids_by_path.get(&path)
+                {
+                    shared_sample_ids.push((*sound_type, shared_id));
+                    break;
+                }
                 let decode_started_at = Instant::now();
                 match loader.load(&path) {
                     Ok(sample) => {
                         let decode_ms = elapsed_ms_u64(decode_started_at);
                         stats.decode_ms = stats.decode_ms.saturating_add(decode_ms);
                         stats.decoded_count = stats.decoded_count.saturating_add(1);
-                        if sound_type.is_bgm() {
+                        if candidate.loop_playback || *sound_type == SoundType::Decide {
+                            bgm_sounds.insert(*sound_type);
                             let key = loudness_cache_key(&path);
                             normalization_paths.insert(*sound_type, path.clone());
                             if let Some(key) = key.as_ref() {
@@ -288,6 +309,9 @@ impl SystemSoundManager {
                             sample.resampled_to(output_sample_rate)
                         };
                         samples.push((*sound_type, id, sample));
+                        if is_se(candidate) {
+                            se_ids_by_path.insert(path, id);
+                        }
                         if candidate.loop_playback {
                             looping_sounds.insert(*sound_type);
                         }
@@ -319,7 +343,9 @@ impl SystemSoundManager {
             normalization_keys,
             source_fingerprint,
             samples,
+            shared_sample_ids,
             looping_sounds,
+            bgm_sounds,
             bgm_normalization_gains,
             normalization_analysis_enabled: normalize_bgm_volume,
             reused_existing_sound_set: false,
@@ -341,6 +367,7 @@ impl SystemSoundManager {
                 AudioEngineCommand::InsertPreparedSample { id, sample }
             })
             .collect::<Vec<_>>();
+        id_map.extend(prepared.shared_sample_ids);
         if !commands.is_empty() && !engine.push_commands(commands) {
             tracing::warn!("failed to enqueue decoded system sounds");
         }
@@ -356,6 +383,7 @@ impl SystemSoundManager {
         manager.normalization_keys = prepared.normalization_keys;
         manager.source_fingerprint = prepared.source_fingerprint;
         manager.looping_sounds = prepared.looping_sounds;
+        manager.bgm_sounds = prepared.bgm_sounds;
         manager
     }
 
@@ -380,6 +408,11 @@ impl SystemSoundManager {
             source_fingerprint: None,
             engine,
             looping_sounds: id_map.keys().copied().filter(SoundType::loops).collect(),
+            bgm_sounds: id_map
+                .keys()
+                .copied()
+                .filter(|sound| sound.loops() || *sound == SoundType::Decide)
+                .collect(),
             id_map,
             last_volumes: RefCell::new(HashMap::new()),
             master_gain: Cell::new(1.0),
@@ -407,6 +440,7 @@ impl SystemSoundManager {
     pub fn normalization_source_matches(&self, prepared: &PreparedSystemSoundSet) -> bool {
         self.normalization_paths == prepared.normalization_paths
             && self.normalization_keys == prepared.normalization_keys
+            && self.bgm_sounds == prepared.bgm_sounds
     }
 
     pub(crate) fn source_fingerprint(&self) -> Option<&SystemSoundSourceFingerprint> {
@@ -414,6 +448,8 @@ impl SystemSoundManager {
     }
 
     /// 適用済みサンプルのBGMパスだけをデコードして解析するworker向け処理。
+    /// `paths`には [`Self::normalization_paths`] の結果を渡す。
+    /// 音種名から再分類せず、デコード時に確定した解析対象を維持する。
     pub fn prepare_normalization_for_paths(
         paths: &HashMap<SoundType, PathBuf>,
         cache_dir: Option<&Path>,
@@ -427,9 +463,6 @@ impl SystemSoundManager {
         let mut stats = SystemSoundPrepareStats::default();
         let mut loader = FfmpegSampleLoader::default();
         for (sound_type, path) in paths {
-            if !sound_type.is_bgm() {
-                continue;
-            }
             let decode_started_at = Instant::now();
             let sample = match loader.load(path) {
                 Ok(sample) => sample,
@@ -461,7 +494,9 @@ impl SystemSoundManager {
             normalization_keys,
             source_fingerprint: None,
             samples: Vec::new(),
+            shared_sample_ids: Vec::new(),
             looping_sounds: HashSet::new(),
+            bgm_sounds: paths.keys().copied().collect(),
             bgm_normalization_gains: gains,
             normalization_analysis_enabled: true,
             reused_existing_sound_set: false,
@@ -490,7 +525,7 @@ impl SystemSoundManager {
         let gain = normalize_volume(gain);
         let loop_playback = self.looping_sounds.contains(&sound_type);
         let mut commands = vec![AudioEngineCommand::SetMasterGain { gain }];
-        if sound_type.is_bgm() {
+        if sound_type.is_scene_music() {
             commands.push(AudioEngineCommand::StopSound { id });
         }
         commands.push(if sound_type == SoundType::Scratch {
@@ -539,6 +574,11 @@ impl SystemSoundManager {
 
     pub fn has_sound(&self, sound_type: SoundType) -> bool {
         self.id_map.contains_key(&sound_type)
+    }
+
+    /// デコードに成功した候補の再生方式に基づく音量・正規化区分。
+    pub fn is_bgm(&self, sound_type: SoundType) -> bool {
+        self.bgm_sounds.contains(&sound_type)
     }
 
     /// 登録済み sound の再生待ち/再生中音量を、SoundType ごとの最新設定で更新する。
@@ -619,11 +659,12 @@ impl SystemSoundManager {
         self.engine.stop_sound_with_fade_out(id, fade_out_frames);
     }
 
-    /// 登録済みかつ `is_bgm()` の SoundType をすべて停止する。
+    /// シーン音源をすべて停止する。通常名の単発RESULT音源も音量区分に関係なく含める。
+    /// `.enter`入場SEは対象外のため、呼び出し側で個別に停止する。
     pub fn stop_all_bgm(&self) {
         let commands = SoundType::ALL
             .iter()
-            .filter(|t| t.is_bgm())
+            .filter(|t| t.is_scene_music())
             .filter_map(|sound_type| self.id_map.get(sound_type).copied())
             .map(|id| AudioEngineCommand::StopSound { id })
             .collect::<Vec<_>>();
@@ -631,7 +672,7 @@ impl SystemSoundManager {
     }
 
     fn effective_volume(&self, sound_type: SoundType, volume: f32) -> f32 {
-        let normalization_gain = if self.normalize_bgm_volume.get() && sound_type.is_bgm() {
+        let normalization_gain = if self.normalize_bgm_volume.get() && self.is_bgm(sound_type) {
             self.bgm_normalization_gains.get(&sound_type).copied().unwrap_or(1.0)
         } else {
             1.0
@@ -796,12 +837,271 @@ fn elapsed_ms_u64(started_at: Instant) -> u64 {
 }
 
 #[cfg(test)]
+impl PreparedSystemSoundSet {
+    /// 共有IDを含め、音種に登録されるサンプルのフレーム数を返す。
+    fn frames_for(&self, sound_type: SoundType) -> Option<usize> {
+        let id = self
+            .samples
+            .iter()
+            .map(|(kind, id, _)| (*kind, *id))
+            .chain(self.shared_sample_ids.iter().copied())
+            .find_map(|(kind, id)| (kind == sound_type).then_some(id))?;
+        self.samples
+            .iter()
+            .find(|(_, sample_id, _)| *sample_id == id)
+            .map(|(_, _, s)| s.frames.len())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use bmz_audio::command::CommandedAudioEngine;
     use bmz_audio::engine::AudioEngine;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn plain_result_source_is_decoded_once_and_shared_by_bgm_and_se_types() {
+        let root = test_temp_dir("shared-plain-result");
+        std::fs::create_dir_all(&root).unwrap();
+        write_test_wav(&root.join("clear.wav"), 3);
+        write_test_wav(&root.join("aaa.wav"), 5);
+        write_test_wav(&root.join("aaa.loop.wav"), 7);
+        let selection = SoundSetSelection { bgm_dir: Some(root.clone()), ..Default::default() };
+        let prepared = SystemSoundManager::prepare(&selection, true, 48_000, None);
+        assert_eq!(prepared.stats.decoded_count, 3);
+        assert_eq!(prepared.samples.len(), 3);
+        assert_eq!(prepared.frames_for(SoundType::ResultBgmClear), Some(3));
+        assert_eq!(prepared.frames_for(SoundType::ResultClear), Some(3));
+        assert_eq!(prepared.frames_for(SoundType::ResultBgmAAA), Some(7), "loop is not shared");
+        assert_eq!(prepared.frames_for(SoundType::ResultAAA), Some(5));
+        let (engine, mut processor) = test_engine();
+        let manager = SystemSoundManager::from_prepared(engine, prepared, true);
+        assert_eq!(
+            manager.id_map[&SoundType::ResultBgmClear],
+            manager.id_map[&SoundType::ResultClear]
+        );
+        assert_ne!(manager.id_map[&SoundType::ResultBgmAAA], manager.id_map[&SoundType::ResultAAA]);
+        assert!(!manager.is_bgm(SoundType::ResultClear));
+        manager.play(SoundType::ResultClear, 1.0);
+        assert!(render(&mut processor, 0, 1)[0] != 0.0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn decoded_playback_classifies_plain_loop_and_decide_and_rejects_stale_analysis() {
+        let root = test_temp_dir("decoded-volume-role");
+        let se = root.join("se");
+        std::fs::create_dir_all(&se).unwrap();
+        for name in [
+            "select.wav",
+            "select.enter.wav",
+            "decide.wav",
+            "clear.wav",
+            "clear.enter.wav",
+            "course_clear.wav",
+            "course_clear.loop.wav",
+        ] {
+            write_test_wav(&root.join(name), 8);
+        }
+        write_test_wav(&se.join("fail.wav"), 8);
+        let selection = SoundSetSelection {
+            bgm_dir: Some(root.clone()),
+            se_dir: Some(se),
+            ..Default::default()
+        };
+        let plain = SystemSoundManager::prepare(&selection, true, 48_000, None);
+        for s in [SoundType::Select, SoundType::Decide, SoundType::CourseBgmClear] {
+            assert!(plain.bgm_sounds.contains(&s));
+            assert!(plain.normalization_paths.contains_key(&s));
+        }
+        for s in [
+            SoundType::SelectEnter,
+            SoundType::ResultBgmClear,
+            SoundType::ResultClear,
+            SoundType::ResultFail,
+            SoundType::ResultEnterClear,
+            SoundType::CourseClear,
+        ] {
+            assert!(!plain.bgm_sounds.contains(&s));
+            assert!(!plain.normalization_paths.contains_key(&s));
+            assert!(!plain.looping_sounds.contains(&s));
+        }
+        let (engine, mut processor) = test_engine();
+        let plain_manager = SystemSoundManager::from_prepared(engine.clone(), plain, true);
+        plain_manager.play(SoundType::ResultBgmClear, 0.25);
+        assert!(render(&mut processor, 0, 1)[0] > 0.0);
+        plain_manager.stop_all_bgm();
+        assert_eq!(render(&mut processor, 1, 1), vec![0.0; 2]);
+        write_test_wav(&root.join("clear.loop.wav"), 8);
+        let looped = SystemSoundManager::prepare(&selection, false, 48_000, None);
+        assert!(looped.bgm_sounds.contains(&SoundType::ResultBgmClear));
+        assert!(looped.looping_sounds.contains(&SoundType::ResultBgmClear));
+        let mut manager = SystemSoundManager::from_prepared(engine.clone(), looped, false);
+        let analysis = SystemSoundManager::prepare_normalization_for_paths(
+            &manager.normalization_paths(),
+            None,
+        );
+        assert!(manager.normalization_source_matches(&analysis));
+        assert!(!plain_manager.normalization_source_matches(&analysis));
+        assert!(!analysis.bgm_normalization_gains.contains_key(&SoundType::ResultClear));
+        manager.apply_normalization_analysis(analysis);
+        manager.play(SoundType::ResultEnterClear, 0.25);
+        manager.play(SoundType::ResultBgmClear, 0.5);
+        let before = render(&mut processor, 2, 2);
+        manager.set_bgm_normalization_enabled(true);
+        manager.refresh_volumes(|s| if manager.is_bgm(s) { 0.2 } else { 0.1 });
+        let after = render(&mut processor, 4, 2);
+        assert!(after[0].abs() < before[0].abs());
+        manager.set_bgm_normalization_enabled(false);
+        manager.refresh_volumes(|s| if manager.is_bgm(s) { 0.5 } else { 0.25 });
+        assert_eq!(render(&mut processor, 6, 2), before);
+        manager.stop_with_fade_out(SoundType::ResultEnterClear, 2);
+        manager.stop_with_fade_out(SoundType::ResultBgmClear, 2);
+        assert_eq!(&render(&mut processor, 8, 4)[4..], &[0.0; 4]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn course_legacy_result_se_prefers_child_parent_se_then_default_after_decode_failure() {
+        let root = test_temp_dir("course-result-se-priority");
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        let se = root.join("se");
+        let default = root.join("default");
+        for dir in [&child, &se, &default] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for name in ["clear", "fail", "a", "aa", "aaa"] {
+            for (dir, frames) in [(&child, 2), (&parent, 4), (&se, 6), (&default, 8)] {
+                write_test_wav(&dir.join(format!("{name}.wav")), frames);
+            }
+        }
+        write_test_wav(&parent.join("course_clear.loop.wav"), 2);
+        let selection = SoundSetSelection {
+            bgm_dir: Some(parent.clone()),
+            bgm_variant_dir: Some(child.clone()),
+            se_dir: Some(se.clone()),
+            default_dir: Some(default.clone()),
+        };
+        for (invalid_dir, expected_frames) in
+            [(None, 2), (Some(&child), 4), (Some(&parent), 6), (Some(&se), 8)]
+        {
+            if let Some(dir) = invalid_dir {
+                for name in ["clear", "fail", "a", "aa", "aaa"] {
+                    std::fs::write(dir.join(format!("{name}.wav")), b"broken").unwrap();
+                }
+            }
+            let prepared = SystemSoundManager::prepare(&selection, false, 48_000, None);
+            for sound in [
+                SoundType::ResultClear,
+                SoundType::ResultFail,
+                SoundType::ResultA,
+                SoundType::ResultAA,
+                SoundType::ResultAAA,
+            ] {
+                assert_eq!(prepared.frames_for(sound), Some(expected_frames));
+                assert!(!prepared.looping_sounds.contains(&sound));
+                assert!(!prepared.normalization_paths.contains_key(&sound));
+            }
+        }
+        write_test_wav(&child.join("clear.wav"), 4);
+        let prepared = SystemSoundManager::prepare(&selection, false, 48_000, None);
+        let (engine, mut processor) = test_engine();
+        let manager = SystemSoundManager::from_prepared(engine, prepared, false);
+        let play = |sounds: Vec<SoundType>| {
+            for sound in sounds {
+                manager.play(sound, if manager.is_bgm(sound) { 0.5 } else { 0.25 });
+            }
+        };
+        let first = render(&mut processor, 0, 1);
+        assert_eq!(first, vec![0.0; 2]);
+        play(vec![SoundType::ResultClear, SoundType::CourseBgmClear]);
+        let both = render(&mut processor, 1, 2);
+        assert!(both[0] > 0.0);
+        manager.stop(SoundType::ResultClear);
+        let bgm = render(&mut processor, 3, 2);
+        assert!((both[0] - bgm[0] * 1.5).abs() < 0.00001);
+        manager.stop_all_bgm();
+        play(vec![SoundType::ResultBgmClear]);
+        let plain = render(&mut processor, 5, 2);
+        assert!((plain[0] * 2.0 - bgm[0]).abs() < 0.00001);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn explicit_enter_and_loop_decode_independently_with_bgm_only_normalization() {
+        let root = test_temp_dir("enter-loop-decode");
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("clear.enter.wav"), b"broken").unwrap();
+        std::fs::write(child.join("clear.loop.wav"), b"broken").unwrap();
+        write_test_wav(&root.join("clear.enter.wav"), 5);
+        write_test_wav(&root.join("clear.loop.wav"), 2);
+        write_test_wav(&root.join("course_clear.loop.wav"), 2);
+        let prepared = SystemSoundManager::prepare(
+            &SoundSetSelection {
+                bgm_dir: Some(root.clone()),
+                bgm_variant_dir: Some(child),
+                ..Default::default()
+            },
+            true,
+            48_000,
+            None,
+        );
+        assert_eq!(
+            prepared
+                .samples
+                .iter()
+                .find(|(s, _, _)| *s == SoundType::ResultEnterClear)
+                .unwrap()
+                .2
+                .frames
+                .len(),
+            5
+        );
+        assert!(!prepared.normalization_paths.contains_key(&SoundType::ResultEnterClear));
+        assert_eq!(prepared.normalization_paths.len(), 2);
+        assert!(prepared.looping_sounds.contains(&SoundType::ResultBgmClear));
+        assert!(prepared.looping_sounds.contains(&SoundType::CourseBgmClear));
+        assert!(!prepared.looping_sounds.contains(&SoundType::ResultEnterClear));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn independent_enter_and_bgm_mix_immediately_and_fade_together() {
+        let (engine, mut processor) = test_engine();
+        let se_id = SoundId(SYSTEM_SOUND_BASE);
+        let bgm_id = SoundId(SYSTEM_SOUND_BASE + 1);
+        for (id, frames) in [(se_id, 4), (bgm_id, 2)] {
+            insert_sample(
+                &engine,
+                &mut processor,
+                id,
+                DecodedSample { channels: 1, sample_rate: 48_000, frames: vec![1.0; frames] },
+            );
+        }
+        let manager = SystemSoundManager::with_id_map_and_normalization_gains(
+            engine,
+            HashMap::from([
+                (SoundType::ResultEnterClear, se_id),
+                (SoundType::CourseBgmClear, bgm_id),
+            ]),
+            HashMap::from([(SoundType::CourseBgmClear, 0.5)]),
+            true,
+            true,
+        );
+        manager.play(SoundType::ResultEnterClear, 0.25);
+        manager.play(SoundType::CourseBgmClear, 0.5);
+        assert_eq!(render(&mut processor, 0, 2), vec![0.5; 4]);
+        assert_eq!(render(&mut processor, 2, 2), vec![0.5; 4]);
+        assert_eq!(render(&mut processor, 4, 1), vec![0.25; 2]);
+        manager.play(SoundType::ResultEnterClear, 0.25);
+        manager.stop_with_fade_out(SoundType::ResultEnterClear, 2);
+        manager.stop_with_fade_out(SoundType::CourseBgmClear, 2);
+        let faded = render(&mut processor, 5, 4);
+        assert!(faded[0] > 0.0);
+        assert_eq!(&faded[4..], &[0.0; 4]);
+    }
 
     #[test]
     fn new_succeeds_with_empty_selection_and_registers_no_samples() {
@@ -936,7 +1236,7 @@ mod tests {
             Some(fingerprint),
         );
         assert!(!changed.reused_existing_sound_set);
-        assert_eq!(changed.stats.decoded_count, 2);
+        assert_eq!(changed.stats.decoded_count, 2, "plain clear is shared by BGM and SE types");
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -991,7 +1291,7 @@ mod tests {
         std::fs::create_dir_all(&bgm).unwrap();
         std::fs::create_dir_all(&se).unwrap();
         let select_path = bgm.join("select.wav");
-        let result_bgm_path = bgm.join("clear.wav");
+        let result_bgm_path = bgm.join("clear.loop.wav");
         write_test_wav(&select_path, 48_000);
         write_test_wav(&result_bgm_path, 48_000);
         write_test_wav(&se.join("clear.wav"), 48_000);
@@ -1104,17 +1404,16 @@ mod tests {
             (SoundType::ResultClear, 7),
             (SoundType::ResultClose, 9),
             (SoundType::ResultBgmAAA, 2),
-            (SoundType::ResultAAA, 3),
+            (SoundType::ResultAAA, 2),
             (SoundType::ResultA, 6),
         ] {
-            let sample = prepared.samples.iter().find(|(kind, _, _)| *kind == sound).unwrap();
-            assert_eq!(sample.2.frames.len(), expected_frames);
+            assert_eq!(prepared.frames_for(sound), Some(expected_frames));
             assert!(!prepared.looping_sounds.contains(&sound));
         }
-        assert!(!prepared.samples.iter().any(|(sound, _, _)| *sound == SoundType::ResultBgmFail));
-        assert!(!prepared.samples.iter().any(|(sound, _, _)| *sound == SoundType::ResultBgmClear));
-        assert!(!prepared.samples.iter().any(|(sound, _, _)| *sound == SoundType::ResultAA));
-        assert_eq!(prepared.stats.analysis_count, 1, "only the Result BGM should be analyzed");
+        for sound in [SoundType::ResultBgmFail, SoundType::ResultBgmClear, SoundType::ResultAA] {
+            assert_eq!(prepared.frames_for(sound), None);
+        }
+        assert_eq!(prepared.stats.analysis_count, 0, "plain Result sources are SE");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1141,32 +1440,18 @@ mod tests {
 
         let prepared = SystemSoundManager::prepare(&selection, true, 48_000, None);
 
-        let frames_for = |kind| {
-            prepared
-                .samples
-                .iter()
-                .find_map(|(sound_type, _, sample)| {
-                    (*sound_type == kind).then_some(sample.frames.len())
-                })
-                .unwrap()
-        };
+        let frames_for = |kind| prepared.frames_for(kind).unwrap();
         assert_eq!(frames_for(SoundType::Scratch), 3, "broken child should fall back to parent");
         assert_eq!(frames_for(SoundType::ResultBgmClear), 2, "child plain file beats parent loop");
         assert_eq!(frames_for(SoundType::ResultBgmAAA), 5, "rank BGM can come from parent");
         assert!(!prepared.looping_sounds.contains(&SoundType::ResultBgmClear));
-        assert_eq!(
-            prepared.normalization_paths.get(&SoundType::ResultBgmClear),
-            Some(&child.join("clear.wav"))
-        );
-        assert_eq!(
-            prepared.normalization_paths.get(&SoundType::ResultBgmAAA),
-            Some(&parent.join("aaa.wav"))
-        );
+        assert!(!prepared.normalization_paths.contains_key(&SoundType::ResultBgmClear));
+        assert!(!prepared.normalization_paths.contains_key(&SoundType::ResultBgmAAA));
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn prepared_result_bgm_loops_only_with_suffix_and_stops_without_stopping_se() {
+    fn prepared_result_bgm_loops_only_with_suffix_and_keeps_distinct_se_playing() {
         let root = test_temp_dir("result-loop");
         std::fs::create_dir_all(&root).unwrap();
         write_test_wav(&root.join("clear.loop.wav"), 2);
@@ -1208,10 +1493,10 @@ mod tests {
         manager.stop_all_bgm();
         assert_eq!(render(&mut processor, 16, 2), first);
         manager.stop(SoundType::ResultClear);
+        // 同じaaa.wavを共有するため、通常RESULTとして停止すると互換SEとしての再生も止まる。
         manager.play(SoundType::ResultAAA, 1.0);
         manager.stop_all_bgm();
-        assert_eq!(render(&mut processor, 18, 2), first);
-        assert_eq!(render(&mut processor, 20, 2), vec![0.0; 4]);
+        assert_eq!(render(&mut processor, 18, 2), vec![0.0; 4]);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1225,16 +1510,18 @@ mod tests {
             id,
             DecodedSample { channels: 1, sample_rate: 48_000, frames: vec![1.0; 4] },
         );
-        let manager = SystemSoundManager::with_id_map_and_normalization_gains(
+        let mut manager = SystemSoundManager::with_id_map_and_normalization_gains(
             engine,
             HashMap::from([(SoundType::ResultBgmClear, id)]),
             HashMap::from([(SoundType::ResultBgmClear, 0.5)]),
             true,
             true,
         );
+        manager.looping_sounds.insert(SoundType::ResultBgmClear);
+        manager.bgm_sounds.insert(SoundType::ResultBgmClear);
         manager.play(SoundType::ResultBgmClear, 1.0);
         assert_eq!(render(&mut processor, 0, 1), vec![0.5; 2]);
-        manager.refresh_volumes(|sound| if sound.is_bgm() { 0.4 } else { 1.0 });
+        manager.refresh_volumes(|sound| if manager.is_bgm(sound) { 0.4 } else { 1.0 });
         assert_eq!(render(&mut processor, 1, 1), vec![0.2; 2]);
         manager.set_bgm_normalization_enabled(false);
         manager.refresh_volumes(|_| 0.4);
@@ -1347,7 +1634,7 @@ mod tests {
         manager.play(SoundType::Select, 1.0);
         render(&mut processor, 0, 1);
 
-        manager.refresh_volumes(|sound_type| if sound_type.is_bgm() { 0.25 } else { 1.0 });
+        manager.refresh_volumes(|sound_type| if manager.is_bgm(sound_type) { 0.25 } else { 1.0 });
         assert_eq!(render(&mut processor, 1, 1), vec![0.25, 0.25]);
     }
 
@@ -1421,7 +1708,9 @@ mod tests {
             normalization_keys: HashMap::new(),
             source_fingerprint: None,
             samples: Vec::new(),
+            shared_sample_ids: Vec::new(),
             looping_sounds: HashSet::new(),
+            bgm_sounds: HashSet::from([SoundType::Select]),
             bgm_normalization_gains: HashMap::from([(SoundType::Select, 0.25)]),
             normalization_analysis_enabled: true,
             reused_existing_sound_set: false,

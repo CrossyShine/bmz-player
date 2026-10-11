@@ -465,6 +465,7 @@ impl WinitApp {
         });
         if let Some(manager) = &self.audio.system_sound {
             manager.stop_all_bgm();
+            manager.stop(crate::system_sound::SoundType::SelectEnter);
         }
         self.audio.system_sound = None;
         self.audio.pending_system_sound = None;

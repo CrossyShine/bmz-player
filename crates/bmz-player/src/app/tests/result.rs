@@ -1,5 +1,101 @@
 use super::*;
 
+#[test]
+fn explicit_enter_replaces_plain_result_se_but_coexists_with_loop() {
+    use crate::system_sound::SoundType::*;
+    let available = |s| [ResultEnterClear, ResultBgmClear, ResultClear].contains(&s);
+    assert_eq!(
+        result_entry_sounds(ClearType::Normal, 0, 0, available, |_| false),
+        vec![ResultEnterClear]
+    );
+    assert_eq!(
+        result_entry_sounds(ClearType::Normal, 0, 0, available, |s| s == ResultBgmClear),
+        vec![ResultEnterClear, ResultBgmClear]
+    );
+    assert_eq!(
+        result_entry_sounds(
+            ClearType::Normal,
+            0,
+            0,
+            |s| [ResultBgmClear, ResultClear].contains(&s),
+            |_| false
+        ),
+        vec![ResultBgmClear]
+    );
+}
+
+#[test]
+fn explicit_result_enter_and_bgm_have_independent_rank_fallbacks() {
+    use crate::system_sound::SoundType::*;
+    for (score, enter, bgm) in [
+        (800, ResultEnterAAA, ResultBgmAAA),
+        (700, ResultEnterAA, ResultBgmAA),
+        (600, ResultEnterA, ResultBgmA),
+    ] {
+        let sounds = |available: &[crate::system_sound::SoundType]| {
+            result_entry_sounds(
+                ClearType::Normal,
+                score,
+                450,
+                |s| available.contains(&s),
+                |s| s.is_result_bgm(),
+            )
+        };
+        assert_eq!(sounds(&[enter, bgm, ResultClear]), vec![enter, bgm]);
+        assert_eq!(sounds(&[enter, ResultBgmClear]), vec![enter, ResultBgmClear]);
+        assert_eq!(sounds(&[ResultEnterClear, bgm]), vec![ResultEnterClear, bgm]);
+        assert_eq!(sounds(&[enter, ResultClear]), vec![enter]);
+        assert_eq!(sounds(&[ResultBgmClear, ResultClear]), vec![ResultBgmClear]);
+        assert_eq!(sounds(&[ResultClear]), vec![ResultClear]);
+    }
+    assert_eq!(
+        result_entry_sounds(
+            ClearType::Normal,
+            800,
+            450,
+            |s| { [ResultEnterAA, ResultBgmAA, ResultEnterClear, ResultBgmClear].contains(&s) },
+            |s| s.is_result_bgm()
+        ),
+        vec![ResultEnterClear, ResultBgmClear]
+    );
+    assert_eq!(
+        result_entry_sounds(ClearType::Failed, 900, 450, |_| true, |s| s.is_result_bgm()),
+        vec![ResultEnterFail, ResultBgmFail]
+    );
+}
+
+#[test]
+fn course_entry_keeps_legacy_fallback_and_uses_only_course_bgm() {
+    use crate::system_sound::SoundType::*;
+    for (clear, enter, legacy, bgm, fallback) in [
+        (ClearType::Normal, CourseEnterClear, CourseClear, CourseBgmClear, ResultClear),
+        (ClearType::Failed, CourseEnterFail, CourseFail, CourseBgmFail, ResultFail),
+    ] {
+        let sounds = |available: &[crate::system_sound::SoundType]| {
+            course_result_entry_sounds(clear, |s| available.contains(&s))
+        };
+        assert_eq!(sounds(&[enter, legacy, bgm, fallback]), vec![enter, bgm]);
+        assert_eq!(sounds(&[legacy, bgm]), vec![legacy, bgm]);
+        assert_eq!(sounds(&[fallback, bgm]), vec![fallback, bgm]);
+        assert_eq!(sounds(&[ResultBgmClear, ResultEnterClear]), vec![fallback]);
+    }
+    for enter in crate::system_sound::SoundType::RESULT_ENTERS {
+        assert!(result_exit_system_sounds().contains(&enter));
+    }
+}
+
+#[test]
+fn system_sound_volume_uses_bgm_or_se_profile_volume_by_decoded_role() {
+    // 音種ごとのBGM/SE区分はSystemSoundManagerのデコード結果で決まり、
+    // system_sound_managerのテストで検証する。ここではprofile音量への対応だけを確認する。
+    let mut mix = ProfileConfig::new_default("default", "Default", 1).audio_mix;
+    mix.master_volume = 50;
+    mix.system_se_volume = 80;
+    mix.system_bgm_volume = 20;
+    assert_eq!(system_sound_volume_from_mix(&mix, false), 0.4);
+    assert_eq!(system_sound_volume_from_mix(&mix, true), 0.1);
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "creates a Winit event loop; run alone with --ignored"]

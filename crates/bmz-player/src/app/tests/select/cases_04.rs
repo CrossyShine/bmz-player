@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn select_enter_waits_for_new_set_and_fires_once_per_entry() {
+    let mut pending = true;
+    assert!(!take_select_enter(&mut pending, true, true, true, false));
+    assert!(pending, "old set must not consume entry");
+    assert!(!take_select_enter(&mut pending, true, false, false, false));
+    assert!(take_select_enter(&mut pending, true, false, true, false));
+    assert!(!take_select_enter(&mut pending, true, false, true, false));
+    pending = true; // Result / Decideから再入場し、同じセットを再利用する場合も一度だけ。
+    assert!(!take_select_enter(&mut pending, false, false, true, false));
+    assert!(take_select_enter(&mut pending, true, false, true, false));
+    pending = true;
+    assert!(!take_select_enter(&mut pending, true, false, true, true));
+    assert!(!pending, "Viewer suppressed entry must not play later");
+}
+
+#[test]
 fn select_score_context_changes_only_for_rule_or_ln_mode() {
     let profile = ProfileConfig::new_default("default", "Default", 1);
     let before = SelectScoreContext::from_profile(&profile);

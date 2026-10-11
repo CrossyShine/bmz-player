@@ -19,6 +19,7 @@ impl WinitApp {
         if should_shuffle_system_sound_sets_on_scene_enter(previous, scene_kind) {
             self.shuffle_system_sound_sets();
         }
+        self.audio.select_enter_pending = scene_kind == AppSceneKind::Select;
         self.fire_scene_transition_sounds(scene_kind);
         if let Some(window) = &self.window {
             if crate::cli::latency_validation_enabled() {
@@ -174,10 +175,16 @@ impl WinitApp {
     }
     /// シーン遷移時のシステム SE / BGM を発火する。
     /// Play 入口では Decide 音を曲開始まで残し、それ以外では進行中の BGM を止める。
-    pub(super) fn fire_scene_transition_sounds(&self, scene_kind: AppSceneKind) {
+    pub(super) fn fire_scene_transition_sounds(&mut self, scene_kind: AppSceneKind) {
         use crate::system_sound::SoundType;
         for sound_type in system_bgm_stop_targets_on_scene_enter(scene_kind) {
             self.stop_system_sound(*sound_type);
+        }
+        for &sound in &SoundType::RESULT_ENTERS {
+            self.stop_system_sound(sound);
+        }
+        if scene_kind == AppSceneKind::Select {
+            self.play_pending_select_enter();
         }
         match scene_kind {
             AppSceneKind::Select if self.viewer_waiting => {}
@@ -197,14 +204,34 @@ impl WinitApp {
                     return;
                 };
                 let clear_type = result_entry_clear_type_for_sound(finished);
-                let sound = result_entry_sound_for_result(
+                for sound in result_entry_sounds(
                     clear_type,
                     finished.summary.ex_score,
                     finished.summary.total_notes,
                     |sound| self.system_sound_has(sound),
-                );
-                self.play_system_sound(sound);
+                    |sound| {
+                        self.audio
+                            .system_sound
+                            .as_ref()
+                            .is_some_and(|manager| manager.is_bgm(sound))
+                    },
+                ) {
+                    self.play_system_sound(sound);
+                }
             }
+        }
+    }
+
+    pub(super) fn play_pending_select_enter(&mut self) {
+        let in_select = self.current_scene_kind() == AppSceneKind::Select;
+        if take_select_enter(
+            &mut self.audio.select_enter_pending,
+            in_select,
+            self.audio.pending_system_sound.is_some(),
+            self.audio.system_sound.is_some(),
+            self.viewer_waiting,
+        ) {
+            self.play_system_sound(crate::system_sound::SoundType::SelectEnter);
         }
     }
 
@@ -225,7 +252,10 @@ impl WinitApp {
         if let Some(manager) = &self.audio.system_sound {
             manager.play_with_master_gain(
                 sound_type,
-                system_sound_volume_from_mix(&self.boot.profile_config.audio_mix, sound_type),
+                system_sound_volume_from_mix(
+                    &self.boot.profile_config.audio_mix,
+                    manager.is_bgm(sound_type),
+                ),
                 1.0,
             );
             self.start_audio_output_stream();
@@ -244,13 +274,9 @@ impl WinitApp {
         for &sound in result_exit_system_sounds() {
             self.stop_system_sound(sound);
         }
-        let preferred = course_result_entry_sound_for_clear(clear_type);
-        let sound = if self.system_sound_has(preferred) {
-            preferred
-        } else {
-            result_entry_sound_for_clear(clear_type)
-        };
-        self.play_system_sound(sound);
+        for sound in course_result_entry_sounds(clear_type, |sound| self.system_sound_has(sound)) {
+            self.play_system_sound(sound);
+        }
     }
 
     pub(super) fn system_sound_has(&self, sound_type: crate::system_sound::SoundType) -> bool {
@@ -272,7 +298,7 @@ impl WinitApp {
         self.audio.system_sound.as_ref().map(|manager| {
             manager.gameplay_output(system_sound_volume_from_mix(
                 &self.boot.profile_config.audio_mix,
-                crate::system_sound::SoundType::Landmine,
+                manager.is_bgm(crate::system_sound::SoundType::Landmine),
             ))
         })
     }
