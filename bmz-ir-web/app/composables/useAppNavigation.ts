@@ -1,5 +1,9 @@
 import type { NavigationMenuItem } from '@nuxt/ui'
 
+/** サイドバーの開閉状態を管理するための、子項目を持つ項目の値。 */
+export const APP_NAV_MANUAL_VALUE = 'manual'
+export const APP_NAV_ACCOUNT_VALUE = 'account'
+
 export const appNavigationMenuUi = {
   link: 'p-1.5 overflow-hidden',
 }
@@ -14,6 +18,7 @@ export function useAppNavigation() {
   const { user, clear } = useUserSession()
   const localePath = useLocalePath()
   const { t } = useI18n()
+  const { pages: manualPageList, pagePath: manualPagePath } = useManual()
 
   const logout = async () => {
     await $fetch('/api/v1/auth/logout', { method: 'POST' })
@@ -25,7 +30,16 @@ export function useAppNavigation() {
     { label: t('nav.charts'), icon: 'i-lucide-list-music', to: localePath('/charts') },
     { label: t('nav.courses'), icon: 'i-lucide-medal', to: localePath('/courses') },
     { label: t('nav.players'), icon: 'i-lucide-users', to: localePath('/players') },
-    { label: t('nav.manual'), icon: 'i-lucide-book-open', to: localePath('/manual') },
+    {
+      label: t('nav.manual'),
+      icon: 'i-lucide-book-open',
+      to: localePath('/manual'),
+      value: APP_NAV_MANUAL_VALUE,
+      children: manualPageList.value.map((page) => ({
+        label: page.title,
+        to: manualPagePath(page.slug),
+      })),
+    },
   ])
 
   const accountItems = computed<NavigationMenuItem[]>(() =>
@@ -34,7 +48,7 @@ export function useAppNavigation() {
           {
             label: user.value.displayName ?? t('nav.profile'),
             icon: 'i-lucide-user',
-            defaultOpen: true,
+            value: APP_NAV_ACCOUNT_VALUE,
             children: [
               { label: t('nav.daily'), to: localePath('/daily'), icon: 'i-lucide-calendar-days' },
               { label: t('nav.rivals'), to: localePath('/rivals'), icon: 'i-lucide-users-round' },

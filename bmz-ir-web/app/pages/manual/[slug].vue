@@ -35,70 +35,47 @@ useSeoMeta({
 
 <template>
   <main>
-    <div
-      v-if="page"
-      class="mx-auto flex w-full max-w-6xl flex-col gap-8 px-5 py-10 lg:flex-row lg:items-start"
-    >
-      <nav class="shrink-0 lg:sticky lg:top-6 lg:w-56" :aria-label="t('manual.contents')">
-        <ULink
-          :to="localePath('/manual')"
-          class="mb-3 inline-flex items-center gap-1 text-sm text-muted hover:text-highlighted"
-        >
-          <UIcon name="i-lucide-book-open" />
-          {{ t('manual.title') }}
-        </ULink>
-        <ol class="flex flex-col gap-1 text-sm">
-          <li v-for="item in pages" :key="item.slug">
-            <ULink
-              :to="pagePath(item.slug)"
-              class="block rounded px-2 py-1"
-              :class="
-                item.slug === page.slug
-                  ? 'bg-elevated font-semibold text-highlighted'
-                  : 'text-muted hover:text-highlighted'
-              "
-            >
-              {{ item.title }}
-            </ULink>
-          </li>
-        </ol>
-      </nav>
+    <section v-if="page" class="mx-auto w-full max-w-4xl px-5 py-10">
+      <ULink
+        :to="localePath('/manual')"
+        class="mb-2 inline-flex items-center gap-1 text-sm font-medium text-primary-300 hover:opacity-80"
+      >
+        <UIcon name="i-lucide-book-open" />
+        {{ t('manual.title') }}
+      </ULink>
+      <UAlert
+        v-if="showsFallback"
+        class="mb-6"
+        color="neutral"
+        icon="i-lucide-languages"
+        :title="t('manual.englishOnly')"
+        variant="subtle"
+      />
+      <h1 class="mb-6 text-3xl font-semibold">{{ page.title }}</h1>
+      <!-- eslint-disable-next-line vue/no-v-html -- リポジトリ内の原稿だけを表示する -->
+      <div class="manual-content" @click="onContentClick" v-html="html" />
 
-      <article class="min-w-0 flex-1">
-        <UAlert
-          v-if="showsFallback"
-          class="mb-6"
+      <div class="mt-12 flex flex-col gap-3 border-t border-default pt-6 sm:flex-row">
+        <UButton
+          v-if="previous"
           color="neutral"
-          icon="i-lucide-languages"
-          :title="t('manual.englishOnly')"
+          icon="i-lucide-arrow-left"
+          :to="pagePath(previous.slug)"
           variant="subtle"
-        />
-        <h1 class="mb-6 text-3xl font-semibold">{{ page.title }}</h1>
-        <!-- eslint-disable-next-line vue/no-v-html -- リポジトリ内の原稿だけを表示する -->
-        <div class="manual-content" @click="onContentClick" v-html="html" />
-
-        <div class="mt-12 flex flex-col gap-3 border-t border-default pt-6 sm:flex-row">
-          <UButton
-            v-if="previous"
-            color="neutral"
-            icon="i-lucide-arrow-left"
-            :to="pagePath(previous.slug)"
-            variant="subtle"
-          >
-            {{ t('manual.previous', { title: previous.title }) }}
-          </UButton>
-          <UButton
-            v-if="next"
-            class="sm:ml-auto"
-            color="neutral"
-            trailing-icon="i-lucide-arrow-right"
-            :to="pagePath(next.slug)"
-            variant="subtle"
-          >
-            {{ t('manual.next', { title: next.title }) }}
-          </UButton>
-        </div>
-      </article>
-    </div>
+        >
+          {{ t('manual.previous', { title: previous.title }) }}
+        </UButton>
+        <UButton
+          v-if="next"
+          class="sm:ml-auto"
+          color="neutral"
+          trailing-icon="i-lucide-arrow-right"
+          :to="pagePath(next.slug)"
+          variant="subtle"
+        >
+          {{ t('manual.next', { title: next.title }) }}
+        </UButton>
+      </div>
+    </section>
   </main>
 </template>

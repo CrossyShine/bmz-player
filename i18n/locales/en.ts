@@ -91,7 +91,6 @@ export default defineI18nLocale(() =>
         title: 'Manual',
         description:
           'How to get started with BMZ Player, how to play, and what to do when something goes wrong.',
-        contents: 'Contents',
         englishOnly:
           'The manual is available in Japanese and English. The English version is shown.',
         previous: 'Previous: {title}',
