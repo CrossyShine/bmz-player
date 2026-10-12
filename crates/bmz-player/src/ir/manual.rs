@@ -149,6 +149,8 @@ pub struct IrManualUploadReport {
     pub skipped_course_stage: u32,
     pub skipped_autoplay: u32,
     pub missing_replays: u32,
+    /// 読み取り・payload作成に失敗して飛ばした履歴数。詳細は `messages`。
+    pub skipped_invalid: u32,
     /// 最後のenqueueがbatch上限に達したか。
     pub limit_reached: bool,
     pub messages: Vec<String>,

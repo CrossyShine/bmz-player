@@ -2,7 +2,8 @@ use super::download::now_unix_seconds;
 use super::output::{no_cancel, print_progress};
 use super::*;
 use crate::ir::manual::{
-    IrManualContext, IrManualStop, IrSyncContext, upload_local_all, upload_local_batch,
+    IrManualContext, IrManualStop, IrManualUploadReport, IrSyncContext, upload_local_all,
+    upload_local_batch,
 };
 
 pub(super) async fn upload_local(
@@ -35,22 +36,12 @@ pub(super) async fn upload_local(
     if !all {
         let report =
             upload_local_batch(&ctx, &options, sync_after_enqueue, &mut sink, &cancel).await?;
-        if report.skipped_resend_payload_unavailable > 0 {
-            bail!(
-                "{} succeeded score(s) cannot be resent because their original request payload is unavailable",
-                report.skipped_resend_payload_unavailable
-            );
-        }
+        ensure_no_skipped_scores(&report)?;
         return Ok(());
     }
 
     let report = upload_local_all(&ctx, &options, now_unix_seconds(), &mut sink, &cancel).await?;
-    if report.skipped_resend_payload_unavailable > 0 {
-        bail!(
-            "{} succeeded score(s) cannot be resent because their original request payload is unavailable",
-            report.skipped_resend_payload_unavailable
-        );
-    }
+    ensure_no_skipped_scores(&report)?;
     match report.stop {
         IrManualStop::FailedJobs { failed } => bail!(
             "full local upload finished with {} submissions and {failed} failed job(s); failed jobs stay queued for retry",
@@ -76,4 +67,21 @@ pub(super) async fn upload_local(
         ),
         IrManualStop::Completed | IrManualStop::Cancelled => Ok(()),
     }
+}
+
+/// 送れなかった履歴があれば、他の処理を終えた後で非ゼロ終了にする。
+fn ensure_no_skipped_scores(report: &IrManualUploadReport) -> Result<()> {
+    if report.skipped_invalid > 0 {
+        bail!(
+            "{} local score(s) were skipped because they could not be read or prepared; see the messages above",
+            report.skipped_invalid
+        );
+    }
+    if report.skipped_resend_payload_unavailable > 0 {
+        bail!(
+            "{} succeeded score(s) cannot be resent because their original request payload is unavailable",
+            report.skipped_resend_payload_unavailable
+        );
+    }
+    Ok(())
 }

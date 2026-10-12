@@ -26,7 +26,7 @@ pub(super) fn print_progress(event: &IrManualProgress) {
                 println!("enqueued: {}", report.enqueued);
             }
             println!(
-                "skipped: already_submitted={}, already_queued={}, resend_payload_unavailable={}, busy={}, missing_chart={}, course_stage={}, autoplay={}",
+                "skipped: already_submitted={}, already_queued={}, resend_payload_unavailable={}, busy={}, missing_chart={}, course_stage={}, autoplay={}, invalid={}",
                 report.skipped_already_submitted,
                 report.skipped_already_queued,
                 report.skipped_resend_payload_unavailable,
@@ -34,7 +34,11 @@ pub(super) fn print_progress(event: &IrManualProgress) {
                 report.skipped_missing_chart,
                 report.skipped_course_stage,
                 report.skipped_autoplay,
+                report.skipped_invalid,
             );
+            for message in &report.messages {
+                println!("  {message}");
+            }
             if report.missing_replays > 0 {
                 println!(
                     "replay files missing: {} (scores were queued without replay)",

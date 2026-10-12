@@ -66,7 +66,17 @@ pub struct IrLocalUploadReport {
     pub skipped_course_stage: u32,
     pub skipped_autoplay: u32,
     pub missing_replays: u32,
+    /// 読み取り・payload作成に失敗して飛ばした履歴数。詳細は `messages`。
+    pub skipped_invalid: u32,
     pub limit_reached: bool,
+    pub messages: Vec<String>,
+}
+
+impl IrLocalUploadReport {
+    fn record_invalid(&mut self, score_id: i64, error: &anyhow::Error) {
+        self.skipped_invalid += 1;
+        self.messages.push(format!("score {score_id}: {error:#}"));
+    }
 }
 
 pub fn is_local_backfill_submission(payload: &IrScoreSubmission) -> bool {
@@ -127,9 +137,17 @@ pub(crate) fn enqueue_local_score_jobs_with_processed(
 
     for row in rows {
         report.scanned += 1;
-        if options.resend && processed.contains(&row.id) {
-            continue;
-        }
+        // resendでは処理済みの履歴、全モードで読み取りに失敗した履歴を同じ実行内で再走査しない。
+        let row = match row {
+            Ok(row) if processed.contains(&row.id) => continue,
+            Ok(row) => row,
+            Err(invalid) => {
+                if processed.insert(invalid.id) {
+                    report.record_invalid(invalid.id, &invalid.error);
+                }
+                continue;
+            }
+        };
 
         if !options.include_course_stages && row.course_score_id.is_some() {
             report.skipped_course_stage += 1;
@@ -200,16 +218,19 @@ pub(crate) fn enqueue_local_score_jobs_with_processed(
             }
         }
 
-        let Some(chart) = primary_chart_for_score(library_db, row.chart_sha256)? else {
-            report.skipped_missing_chart += 1;
-            continue;
+        let prepared = match prepare_submission_inputs(profile_root, library_db, &row, options) {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => {
+                report.skipped_missing_chart += 1;
+                continue;
+            }
+            Err(error) => {
+                processed.insert(row.id);
+                report.record_invalid(row.id, &error);
+                continue;
+            }
         };
-        let analysis = library_db.chart_analysis_by_chart_id(chart.chart_id)?;
-        let replay_hash = if options.include_replay {
-            replay_hash(profile_root, row.replay_path.as_deref())?
-        } else {
-            None
-        };
+        let PreparedSubmissionInputs { chart, analysis, replay_hash } = prepared;
         if options.include_replay
             && row.replay_path.as_deref().is_some_and(|path| !path.is_empty())
             && replay_hash.is_none()
@@ -275,6 +296,33 @@ pub(crate) fn enqueue_local_score_jobs_with_processed(
     }
 
     Ok(report)
+}
+
+struct PreparedSubmissionInputs {
+    chart: ChartListItem,
+    analysis: Option<ChartAnalysis>,
+    replay_hash: Option<String>,
+}
+
+/// 1履歴分の送信に必要な譜面情報とreplay hashを集める。譜面が無ければ `None`。
+///
+/// ここでの失敗（ライブラリの読み取り、replayファイルの読み取り）はその履歴だけを飛ばす。
+fn prepare_submission_inputs(
+    profile_root: &Path,
+    library_db: &LibraryDatabase,
+    row: &BackfillScoreRow,
+    options: &IrLocalUploadOptions,
+) -> Result<Option<PreparedSubmissionInputs>> {
+    let Some(chart) = primary_chart_for_score(library_db, row.chart_sha256)? else {
+        return Ok(None);
+    };
+    let analysis = library_db.chart_analysis_by_chart_id(chart.chart_id)?;
+    let replay_hash = if options.include_replay {
+        replay_hash(profile_root, row.replay_path.as_deref())?
+    } else {
+        None
+    };
+    Ok(Some(PreparedSubmissionInputs { chart, analysis, replay_hash }))
 }
 
 fn has_score_from_target_ir_source(
@@ -449,7 +497,15 @@ struct BackfillScoreRow {
     source_kind: ScoreSourceKind,
 }
 
-fn load_score_history_rows(score_db: &ScoreDatabase) -> Result<Vec<BackfillScoreRow>> {
+/// 値を解釈できなかった `score_history` 行。他の行の処理は続ける。
+struct InvalidScoreRow {
+    id: i64,
+    error: anyhow::Error,
+}
+
+fn load_score_history_rows(
+    score_db: &ScoreDatabase,
+) -> Result<Vec<std::result::Result<BackfillScoreRow, InvalidScoreRow>>> {
     let mut stmt = score_db.conn().prepare(
         "SELECT
             id,
@@ -495,7 +551,11 @@ fn load_score_history_rows(score_db: &ScoreDatabase) -> Result<Vec<BackfillScore
            ON score_history_ir_identity.score_history_id = score_history.id
          ORDER BY played_at ASC, id ASC",
     )?;
-    let rows = stmt.query_map([], score_history_row_from_row)?;
+    let rows = stmt.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        Ok(score_history_row_from_row(row)
+            .map_err(|error| InvalidScoreRow { id, error: anyhow::Error::new(error) }))
+    })?;
     rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
 

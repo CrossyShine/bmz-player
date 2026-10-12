@@ -37,6 +37,8 @@ fn absorb_enqueue(report: &mut IrManualUploadReport, enqueue: &IrLocalUploadRepo
         report.skipped_course_stage.saturating_add(enqueue.skipped_course_stage);
     report.skipped_autoplay = report.skipped_autoplay.saturating_add(enqueue.skipped_autoplay);
     report.missing_replays = report.missing_replays.saturating_add(enqueue.missing_replays);
+    report.skipped_invalid = report.skipped_invalid.saturating_add(enqueue.skipped_invalid);
+    report.messages.extend(enqueue.messages.iter().cloned());
     report.limit_reached = enqueue.limit_reached;
 }
 

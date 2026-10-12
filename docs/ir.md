@@ -103,6 +103,9 @@ SHA-256 fallback でラベルを付与する。
   同じ provider/account から取得済みのscoreも、IR上に既存scoreがあるため候補から除外し、
   `--resend`でも再投入しない。別providerまたは別accountへの送信は引き続き候補になる。
   downloaded source marker はBMZ IR / BMS-IR共通の `bmz_ir` で、providerとaccountも照合する。
+  値を解釈できない履歴や、譜面情報・replayファイルを読めない履歴はその行だけを飛ばし、
+  `invalid` として件数と理由を出力する。他の履歴の投入は続け、1件以上あればCLIは最後に
+  非ゼロで終了する。`--all` では同じ実行内で失敗した行を再走査しない。
   course stage / autoplay は既定で除外。local backfill は未登録 chart を作成できるが、既存 chart
   の正規メタデータは上書きしない。`--sync` で既存の未完了score jobがある場合は、
   queueを増やさず先に最大100件を同期する。投入 batch の既定値は200件。

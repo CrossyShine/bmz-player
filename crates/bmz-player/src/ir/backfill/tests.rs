@@ -687,3 +687,78 @@ fn job_submission_key_from_json(payload: &str) -> String {
         .unwrap()
         .to_owned()
 }
+
+#[test]
+fn unreadable_history_rows_are_skipped_without_blocking_other_scores() {
+    let mut score_db = test_score_db();
+    let mut network_db = test_network_db();
+    let mut library_db = test_library_db();
+    let chart = test_playable_chart("unreadable-history-row");
+    library_db
+        .upsert_chart_import(&ChartImportRecord {
+            root_id: None,
+            file_path: std::path::Path::new("/fixture/song.bms"),
+            file_size: 1,
+            modified_at: 1,
+            scanned_at: 1,
+            chart: &chart,
+        })
+        .unwrap();
+    let mut valid = crate::ir::download::score_record_from_ir_entry(&imported_score_entry(
+        chart.identity.file_sha256,
+    ))
+    .unwrap();
+    valid.played_at = 200;
+    let valid_id = score_db.insert_score(&valid).unwrap();
+    // 壊れたchart hashの行。読み取れないのはこの行だけ。
+    let invalid_id = score_db.insert_score(&valid).unwrap();
+    score_db
+        .conn()
+        .execute(
+            "UPDATE score_history SET chart_sha256 = 'zz', played_at = 100 WHERE id = ?1",
+            [invalid_id],
+        )
+        .unwrap();
+
+    let mut bmz = IrProviderConfig::bmz_ir();
+    bmz.provider_key = "bmz".to_string();
+    bmz.enabled = true;
+    bmz.account_id = "account-a".to_string();
+    let ir_config = IrConfig {
+        primary_provider: "bmz".to_string(),
+        providers: vec![bmz],
+        ..IrConfig::default()
+    };
+    let mut processed = HashSet::new();
+    let report = enqueue_local_score_jobs_with_processed(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut network_db,
+        &IrLocalUploadOptions::default(),
+        1_800_000_000,
+        &mut processed,
+    )
+    .unwrap();
+
+    assert_eq!((report.enqueued, report.skipped_invalid), (1, 1));
+    assert_eq!(report.messages.len(), 1);
+    assert!(report.messages[0].starts_with(&format!("score {invalid_id}:")));
+    assert!(network_db.has_ir_score_job("bmz", "account-a", IrJobKind::Score, valid_id).unwrap());
+
+    // 同じ実行の次のbatchでは、失敗した行を再び報告しない。
+    let next = enqueue_local_score_jobs_with_processed(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut network_db,
+        &IrLocalUploadOptions::default(),
+        1_800_000_001,
+        &mut processed,
+    )
+    .unwrap();
+    assert_eq!((next.enqueued, next.skipped_invalid), (0, 0));
+    assert!(next.messages.is_empty());
+}
