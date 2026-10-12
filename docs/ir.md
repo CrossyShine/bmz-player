@@ -161,7 +161,8 @@ SHA-256 fallback でラベルを付与する。
   remote score IDだけで照合する。
 - download scores: `bmz ir download-scores` は各行の取り込み失敗数を集計してから出力し、
   1件以上あれば通常実行・dry-runとも非ゼロで終了する。通常実行ではほかの有効な行を保存し、
-  再実行時に重複登録しない。dry-runでは保存しない。
+  再実行時に重複登録しない。dry-runでは保存しない。途中のページの取得に失敗した場合も、
+  それまでのページで保存した件数を出力してから非ゼロで終了する。
 - ゲーム内の手動IR操作: 設定 → IR の「スコアの一括操作」と、そこから開く「IR送信キュー」
   ウィンドウ。処理は CLI と共通の `ir::manual`（`upload_local_batch` / `upload_local_all` /
   `sync_jobs` / `download_scores` / `resend_job` / `resend_failed_jobs`）で、CLI は進捗通知を

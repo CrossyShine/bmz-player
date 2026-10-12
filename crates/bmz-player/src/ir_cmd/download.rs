@@ -1,6 +1,9 @@
 use super::output::{no_cancel, print_progress};
 use super::*;
-use crate::ir::manual::{IrSyncContext, download_scores as download_scores_manual};
+use crate::ir::download::IrScoreDownloadReport;
+use crate::ir::manual::{
+    IrManualProgress, IrSyncContext, download_scores as download_scores_manual,
+};
 
 pub(super) async fn download_scores(
     app_paths: &AppPaths,
@@ -18,20 +21,42 @@ pub(super) async fn download_scores(
         ir_config: &profile.ir,
     };
     let (_keep_alive, cancel) = no_cancel();
-    let report = download_scores_manual(
+    // ページを取り込むたびの累計。後のページで失敗しても、保存済みの分を報告する。
+    let mut saved: Option<IrScoreDownloadReport> = None;
+    let result = download_scores_manual(
         &ctx,
         &profile_paths.network_db,
         &options,
-        &mut |event| print_progress(&event),
+        &mut |event| {
+            if let IrManualProgress::DownloadPage(report) = &event {
+                saved = Some(report.clone());
+            }
+            print_progress(&event);
+        },
         &cancel,
     )
-    .await?;
+    .await;
+    let report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            if let Some(report) = saved.filter(|report| report.pages > 0) {
+                println!("download stopped after an error; scores imported before it are kept");
+                print_download_summary(&report, options.dry_run);
+            }
+            return Err(error);
+        }
+    };
+    print_download_summary(&report, options.dry_run);
+    ensure_download_report_success(&report)?;
+    Ok(())
+}
 
+fn print_download_summary(report: &IrScoreDownloadReport, dry_run: bool) {
     println!("provider: {}", report.provider_key);
     println!("account: {}", report.account_id);
     println!("pages: {}", report.pages);
     println!("scanned: {}", report.scanned);
-    if options.dry_run {
+    if dry_run {
         println!("would import: {}", report.candidates);
         println!("would link existing uploads: {}", report.linked_existing);
     } else {
@@ -45,13 +70,9 @@ pub(super) async fn download_scores(
     for message in &report.messages {
         println!("  {message}");
     }
-    ensure_download_report_success(&report)?;
-    Ok(())
 }
 
-fn ensure_download_report_success(
-    report: &crate::ir::download::IrScoreDownloadReport,
-) -> Result<()> {
+fn ensure_download_report_success(report: &IrScoreDownloadReport) -> Result<()> {
     if report.failed > 0 {
         bail!("IR score download had {} row failure(s)", report.failed);
     }

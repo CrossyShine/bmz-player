@@ -570,3 +570,77 @@ fn own_score_history_entry_reads_optional_idempotency_key() {
     let with: IrOwnScoreHistoryEntry = serde_json::from_value(value).unwrap();
     assert_eq!(with.idempotency_key.as_deref(), Some("key-1"));
 }
+
+/// 1ページ目は1件と次のcursorを返し、2ページ目は500を返すIRサーバー。
+fn spawn_failing_second_page_server() -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let first_page = serde_json::json!({
+        "scores": [score_entry("remote-1")],
+        "pagination": {
+            "limit": 100,
+            "offset": 0,
+            "total": 2,
+            "has_more": true,
+            "next_cursor": { "server_received_at_ms": 1, "score_id": "remote-1" }
+        }
+    })
+    .to_string();
+    let server = std::thread::spawn(move || {
+        for body in [Some(first_page), None] {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            let (status, body) = match body {
+                Some(body) => ("200 OK", body),
+                None => ("500 Internal Server Error", r#"{"statusMessage":"boom"}"#.to_string()),
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+    });
+    (format!("http://{address}"), server)
+}
+
+#[tokio::test]
+async fn later_page_failure_keeps_and_reports_pages_already_imported() {
+    let (base_url, server) = spawn_failing_second_page_server();
+    let client =
+        IrOwnScoreHistoryClient::BmzOfficial(BmzOfficialIrClient::new(&base_url, "token").unwrap());
+    let mut score_db = open_score_db();
+    let network_db = open_network_db();
+    let mut pages = Vec::new();
+
+    let error = download_ir_scores_with_hooks(
+        &client,
+        "provider-1",
+        "account-1",
+        &mut score_db,
+        &network_db,
+        &IrScoreDownloadOptions::default(),
+        1_800_000_000,
+        &mut |report| pages.push(report.clone()),
+        None,
+    )
+    .await
+    .unwrap_err();
+    server.join().unwrap();
+
+    assert!(format!("{error:#}").contains("500"));
+    // 呼び出し側（CLIの集計表示・GUIの一覧更新）は、失敗前のページ通知から保存済み件数を知る。
+    assert_eq!(pages.len(), 1);
+    assert_eq!((pages[0].pages, pages[0].imported), (1, 1));
+    assert_eq!(
+        score_db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM score_history", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
