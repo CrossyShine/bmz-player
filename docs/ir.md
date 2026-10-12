@@ -127,6 +127,7 @@ SHA-256 fallback でラベルを付与する。
     伸ばさないためで、成功が1件あれば数え直す。
   他プロセスの `sending` job だけが残って進捗できない場合も非ゼロで終了し、5分のlease後に再実行する。
   `--resend` は失敗済みjob・成功snapshotを同じidempotency keyとrequest payloadで再queueする。
+  再queueしたjobは試行回数を0に戻し、次に失敗したときのbackoffを初回（1分）から数え直す。
   既存pending jobと有効なsending leaseは変更せず、`enqueued` は実際に再queueした件数を示す。
   `--all --resend` は1回の実行内で各履歴を最大1回だけ処理する。`--dry-run --resend` は
   状態を書き換えず、元payloadが不足して再送できない履歴も別カウンターで報告する。

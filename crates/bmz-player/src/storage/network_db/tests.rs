@@ -1360,3 +1360,51 @@ fn failed_before_retry_filter_claims_each_failed_job_once_per_run() {
         .unwrap();
     assert_eq!(respect, IrScoreJobBacklog { claimable: 0, leased: 3, deferred: 1 });
 }
+
+#[test]
+fn backfill_resend_resets_backoff_and_reclaims_expired_leases() {
+    let mut db = open_network_db();
+    let failed = enqueue_test_job(&mut db, 45, 10);
+    for now in [20, 30, 40, 50] {
+        db.mark_ir_score_job_failed(failed, now, "retry", None).unwrap();
+    }
+    let attempts = |db: &NetworkDatabase, id: i64| -> (String, u32) {
+        db.conn()
+            .query_row(
+                "SELECT status, attempt_count FROM ir_score_jobs WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(attempts(&db, failed), ("failed".to_string(), 4));
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 45, 60, None, false).unwrap(),
+        IrBackfillResendOutcome::Enqueued
+    );
+    // 明示的な再送なので、次の失敗は初回のbackoff（60秒）から数え直す。
+    assert_eq!(attempts(&db, failed), ("pending".to_string(), 0));
+    db.mark_ir_score_job_failed(failed, 70, "retry", None).unwrap();
+    let next_attempt_at: i64 = db
+        .conn()
+        .query_row("SELECT next_attempt_at FROM ir_score_jobs WHERE id = ?1", [failed], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(next_attempt_at, 130);
+
+    // leaseの切れたsending jobは再送対象にする。
+    let leased = enqueue_test_job(&mut db, 46, 10);
+    db.mark_ir_score_job_status(leased, IrScoreJobStatus::Sending, 100, "").unwrap();
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 46, 100 + 299, None, false)
+            .unwrap(),
+        IrBackfillResendOutcome::Busy
+    );
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 46, 100 + 301, None, false)
+            .unwrap(),
+        IrBackfillResendOutcome::Enqueued
+    );
+    assert_eq!(attempts(&db, leased).0, "pending");
+}

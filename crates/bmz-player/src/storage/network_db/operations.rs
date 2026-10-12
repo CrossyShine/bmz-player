@@ -272,22 +272,9 @@ impl NetworkDatabase {
             )
             .optional()?;
 
+        // pendingと有効なleaseは上で返している。ここに来るjobは failed / succeeded /
+        // leaseの切れた sending のいずれか。
         if let Some((job_id, status, payload, submission_key)) = existing {
-            if status == "pending" {
-                tx.commit()?;
-                return Ok(IrBackfillResendOutcome::AlreadyPending);
-            }
-            if status == "sending" {
-                let updated_at: i64 = tx.query_row(
-                    "SELECT updated_at FROM ir_score_jobs WHERE id = ?1",
-                    [job_id],
-                    |row| row.get(0),
-                )?;
-                if updated_at > now.saturating_sub(IR_JOB_SENDING_STALE_AFTER_SECONDS) {
-                    tx.commit()?;
-                    return Ok(IrBackfillResendOutcome::Busy);
-                }
-            }
             let (payload, chart, ln): (String, String, String) = if status == "succeeded" {
                 tx.query_row(
                     "SELECT submission_payload_json, submission_key, chart_sha256, ln_policy
@@ -314,9 +301,10 @@ impl NetworkDatabase {
                 tx.commit()?;
                 return Ok(IrBackfillResendOutcome::Enqueued);
             }
+            // 明示的な再送なので、次に失敗したときのbackoffは初回と同じ長さから数え直す。
             tx.execute(
                 "UPDATE ir_score_jobs SET payload_json = ?2, status = 'pending',
-                    next_attempt_at = ?3, last_error = '', updated_at = ?3,
+                    attempt_count = 0, next_attempt_at = ?3, last_error = '', updated_at = ?3,
                     chart_sha256 = ?4, ln_policy = ?5
                  WHERE id = ?1",
                 params![job_id, payload, now, chart, ln],
