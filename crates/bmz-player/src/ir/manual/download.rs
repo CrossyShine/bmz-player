@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use crate::config::profile_config::IrProviderConfig;
 use crate::ir::bmz_official::BmzOfficialIrClient;
 use crate::ir::download::{
     IrOwnScoreHistoryClient, IrScoreDownloadOptions, IrScoreDownloadReport,
@@ -28,6 +29,9 @@ pub async fn download_scores(
     cancel: &IrManualCancel,
 ) -> Result<IrScoreDownloadReport> {
     let provider = selected_provider(ctx.ir_config, options.provider.as_deref())?.clone();
+    if !provider.enabled {
+        bail!("IR provider '{}' is disabled", provider.provider);
+    }
     let provider_key = crate::ir::provider_key::configured_provider_key(&provider)
         .context("IR provider key is not set; log in again")?
         .to_string();
@@ -38,6 +42,7 @@ pub async fn download_scores(
         now_unix_seconds(),
     )
     .await?;
+    ensure_download_account(&provider, &credentials.account_id)?;
     let client = if crate::ir::bms_ir::is_bms_ir_config(&provider) {
         IrOwnScoreHistoryClient::BmsIr {
             client: crate::ir::bms_ir::BmsIrClient::new(&provider.base_url)?,
@@ -68,4 +73,35 @@ pub async fn download_scores(
         Some(cancel),
     )
     .await
+}
+
+/// 取り込んだscoreのsourceは認証情報のaccountで記録し、upload-localは設定のaccountで
+/// 「取得元へ送り返さない」判定をする。両者がずれると判定が効かなくなるため、
+/// 設定と異なるaccountでは取得しない。
+fn ensure_download_account(provider: &IrProviderConfig, signed_in_account: &str) -> Result<()> {
+    let configured = provider.account_id.trim();
+    if !configured.is_empty() && configured != signed_in_account {
+        bail!(
+            "signed-in IR account '{signed_in_account}' differs from the configured account '{configured}'; run `bmz ir login` again"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_requires_the_configured_account() {
+        let mut provider = IrProviderConfig::bmz_ir();
+        provider.account_id = "account-a".to_string();
+        assert!(ensure_download_account(&provider, "account-a").is_ok());
+
+        let error = ensure_download_account(&provider, "account-b").unwrap_err();
+        assert!(error.to_string().contains("differs from the configured account"));
+
+        provider.account_id.clear();
+        assert!(ensure_download_account(&provider, "account-b").is_ok());
+    }
 }
