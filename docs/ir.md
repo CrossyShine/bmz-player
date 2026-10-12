@@ -135,6 +135,9 @@ SHA-256 fallback でラベルを付与する。
   これは廃止済みのevidence形式でqueueに残ったjobを回復するためで、初回送信の署名・
   データ検証も行う。
   per-history ghost は現在の `score_history` には保持していないため送らない。
+- download scores: `bmz ir download-scores` は各行の取り込み失敗数を集計してから出力し、
+  1件以上あれば通常実行・dry-runとも非ゼロで終了する。通常実行ではほかの有効な行を保存し、
+  再実行時に重複登録しない。dry-runでは保存しない。
 - ゲーム内の手動IR操作: 設定 → IR の「スコアの一括操作」と、そこから開く「IR送信キュー」
   ウィンドウ。処理は CLI と共通の `ir::manual`（`upload_local_batch` / `upload_local_all` /
   `sync_jobs` / `download_scores` / `resend_job` / `resend_failed_jobs`）で、CLI は進捗通知を
@@ -148,7 +151,8 @@ SHA-256 fallback でラベルを付与する。
   - 「IRからスコアを取得」は `ir download-scores` 相当で、CLI の既定上限（200 件）を付けず全件を対象にする。
     既に取り込んだ score は除外されるため、中断後の再実行は続きから進む。GUIでは新規scoreが
     保存された場合、完了・中断・エラーの通知時にSelect一覧、フォルダsummary、player statsを更新する。
-    既存履歴へのリンクだけで新規保存がない場合は更新しない。
+    既存履歴へのリンクだけで新規保存がない場合は更新しない。取得結果には取り込み・紐付け・失敗件数を
+    表示し、部分失敗は通常完了と区別する。
   - 送信は `IR_CLI_SYNC_BATCH_LIMIT`（100）件ずつ、job 間 `IR_CLI_SYNC_JOB_SPACING_MS`（200ms）。
     中断は job 間・batch 間・送信間隔の sleep 中に確認し、処理中の 1 件は完了させてから止まる。
   - 書き込み系の操作は同時に 1 つ。要求ごとの世代番号で、古い結果・進捗・一覧読み込みは破棄する。

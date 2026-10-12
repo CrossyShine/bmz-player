@@ -158,6 +158,16 @@ score.db migration 31は、履歴を持たないclear-only日時を保存する
 
 ## IR送信条件
 
+score.db migration 32は、各履歴のlocal backfill用識別キーを
+`score_history_ir_identity` に追加する。既存履歴にはUUID v4を割り当て、
+新規履歴では保存と同じtransactionで生成する。同じ履歴の再送ではキーを維持し、
+別profileで同じ数値のhistory IDになっても衝突しない。DBを複製した場合、
+複製済み履歴のキーは共通のまま、その後に追加した履歴はそれぞれ別のキーになる。
+履歴を削除すると対応するキーも削除する。スコア値・BEST・リプレイは移行で変更しない。
+旧版へ戻す場合は、書き込みを停止して整合したscore.db / network.dbのbackupへ復元し、
+schema versionだけを巻き戻さない。送信済みの識別情報と再送本文の保持は
+[IRの仕様](ir.md)を参照する。
+
 単曲 IR は、通常の履歴保存が成功して `score_history_id > 0` になった後でだけ enqueue
 される。実効アシスト、autoplay、replay、Practice、保存禁止のkey mode変換はこの時点より
 前に除外されるため、`send_policy=Always` でも送信されない。7K規則の`SevenToNine`だけは

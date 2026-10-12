@@ -45,6 +45,16 @@ pub(super) async fn download_scores(
     for message in &report.messages {
         println!("  {message}");
     }
+    ensure_download_report_success(&report)?;
+    Ok(())
+}
+
+fn ensure_download_report_success(
+    report: &crate::ir::download::IrScoreDownloadReport,
+) -> Result<()> {
+    if report.failed > 0 {
+        bail!("IR score download had {} row failure(s)", report.failed);
+    }
     Ok(())
 }
 
@@ -84,4 +94,24 @@ pub(super) fn prompt_password() -> Result<String> {
 
 pub(super) fn now_unix_seconds() -> i64 {
     crate::ir::manual::now_unix_seconds()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_report_validator_returns_error_after_any_row_failure() {
+        assert!(
+            ensure_download_report_success(&crate::ir::download::IrScoreDownloadReport::default())
+                .is_ok()
+        );
+        let report = crate::ir::download::IrScoreDownloadReport {
+            failed: 1,
+            imported: 2,
+            ..Default::default()
+        };
+        let error = ensure_download_report_success(&report).unwrap_err();
+        assert!(error.to_string().contains("1 row failure"));
+    }
 }

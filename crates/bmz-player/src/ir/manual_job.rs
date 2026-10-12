@@ -133,6 +133,10 @@ pub struct IrManualProgressView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrManualOutcomeStatus {
     Completed,
+    /// Score download finished with one or more score import failures.
+    DownloadFailed {
+        failed: u32,
+    },
     Cancelled,
     FailedJobs {
         failed: u32,
@@ -724,11 +728,7 @@ async fn run_op_async(
             let report: IrScoreDownloadReport =
                 download_scores(&sync_ctx, &env.network_db, &options, sink, cancel).await?;
             sink(IrManualProgress::DownloadPage(report.clone()));
-            let status = if report.cancelled {
-                IrManualOutcomeStatus::Cancelled
-            } else {
-                IrManualOutcomeStatus::Completed
-            };
+            let status = download_status(&report);
             Ok(outcome(status, report.messages))
         }
         IrManualOp::ResendJob { provider_key, account_id, kind, local_score_id } => {
@@ -765,6 +765,16 @@ async fn run_op_async(
             };
             Ok(outcome(status, report.messages))
         }
+    }
+}
+
+fn download_status(report: &IrScoreDownloadReport) -> IrManualOutcomeStatus {
+    if report.cancelled {
+        IrManualOutcomeStatus::Cancelled
+    } else if report.failed > 0 {
+        IrManualOutcomeStatus::DownloadFailed { failed: report.failed }
+    } else {
+        IrManualOutcomeStatus::Completed
     }
 }
 
@@ -870,7 +880,22 @@ pub fn outcome_message(text: Localizer, outcome: &IrManualOutcome) -> String {
         matches!(outcome.op, IrManualOp::ResendJob { .. } | IrManualOp::ResendFailed { .. });
     let mut args = FluentArgs::new();
     match &outcome.status {
+        IrManualOutcomeStatus::Cancelled if matches!(outcome.op, IrManualOp::DownloadScores) => {
+            set_download_args(&mut args, progress);
+            text.format("toast-ir-download-cancelled", &args)
+        }
         IrManualOutcomeStatus::Cancelled => text.text("toast-ir-manual-cancelled"),
+        IrManualOutcomeStatus::DownloadFailed { failed } => {
+            args.set("imported", i64::from(progress.download_imported));
+            args.set("linked", i64::from(progress.download_linked));
+            args.set("failed", i64::from(*failed));
+            text.format("toast-ir-download-partial-failure", &args)
+        }
+        IrManualOutcomeStatus::Error(error) if matches!(outcome.op, IrManualOp::DownloadScores) => {
+            args.set("error", error.clone());
+            set_download_args(&mut args, progress);
+            text.format("toast-ir-download-error", &args)
+        }
         IrManualOutcomeStatus::Error(error) => {
             args.set("error", error.clone());
             text.format("toast-ir-manual-error", &args)
@@ -888,8 +913,7 @@ pub fn outcome_message(text: Localizer, outcome: &IrManualOutcome) -> String {
                     text.format("toast-ir-upload-completed", &args)
                 }
                 IrManualOp::DownloadScores => {
-                    args.set("imported", i64::from(progress.download_imported));
-                    args.set("linked", i64::from(progress.download_linked));
+                    set_download_args(&mut args, progress);
                     text.format("toast-ir-download-completed", &args)
                 }
                 IrManualOp::ResendJob { .. } | IrManualOp::ResendFailed { .. } => {
@@ -900,6 +924,12 @@ pub fn outcome_message(text: Localizer, outcome: &IrManualOutcome) -> String {
             }
         }
     }
+}
+
+fn set_download_args(args: &mut crate::i18n::FluentArgs, progress: &IrManualProgressView) {
+    args.set("imported", i64::from(progress.download_imported));
+    args.set("linked", i64::from(progress.download_linked));
+    args.set("failed", i64::from(progress.download_failed));
 }
 
 #[cfg(test)]

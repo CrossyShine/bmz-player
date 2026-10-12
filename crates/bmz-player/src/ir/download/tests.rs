@@ -193,6 +193,52 @@ fn import_ir_score_entries_inserts_once_and_skips_source_duplicate() {
 }
 
 #[test]
+fn mixed_valid_and_invalid_rows_keep_valid_imports_and_retry_without_duplicates() {
+    let mut score_db = open_score_db();
+    let network_db = open_network_db();
+    let mut invalid = score_entry("invalid-row");
+    invalid.clear = "unknown-clear".to_string();
+    let entries = [score_entry("valid-row"), invalid];
+
+    let mut first = IrScoreDownloadReport::default();
+    import_ir_score_entries(
+        &mut score_db,
+        &network_db,
+        "provider-1",
+        "account-1",
+        &entries,
+        false,
+        1_800_000_000,
+        &mut first,
+    )
+    .unwrap();
+    assert_eq!(first.imported, 1);
+    assert_eq!(first.failed, 1);
+
+    let mut retry = IrScoreDownloadReport::default();
+    import_ir_score_entries(
+        &mut score_db,
+        &network_db,
+        "provider-1",
+        "account-1",
+        &entries,
+        false,
+        1_800_000_001,
+        &mut retry,
+    )
+    .unwrap();
+    assert_eq!(retry.imported, 0);
+    assert_eq!(retry.skipped_existing, 1);
+    assert_eq!(retry.failed, 1);
+
+    let count: i64 = score_db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM score_history", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
 fn import_ir_score_entries_links_previously_uploaded_local_score() {
     let mut score_db = open_score_db();
     let mut network_db = open_network_db();

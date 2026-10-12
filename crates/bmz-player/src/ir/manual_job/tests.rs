@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::i18n::{AppLocale, Localizer};
 use crate::ln_policy::LnScorePolicy;
 use crate::storage::network_db::NewIrScoreJob;
 
@@ -83,6 +84,7 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 fn downloaded_imports_refresh_select_for_completed_cancelled_and_error_notices() {
     for status in [
         IrManualOutcomeStatus::Completed,
+        IrManualOutcomeStatus::DownloadFailed { failed: 2 },
         IrManualOutcomeStatus::Cancelled,
         IrManualOutcomeStatus::Error("later page failed".into()),
     ] {
@@ -179,6 +181,46 @@ fn downloaded_imports_refresh_select_for_completed_cancelled_and_error_notices()
     handle.reset_for_profile();
     RunGuard { handle: handle.clone(), generation: 1 }.finish(stale_outcome);
     assert!(handle.take_notice().is_none(), "a superseded profile must discard its notice");
+}
+
+#[test]
+fn download_row_failures_have_a_distinct_status_and_localized_counts() {
+    assert_eq!(
+        download_status(&IrScoreDownloadReport::default()),
+        IrManualOutcomeStatus::Completed
+    );
+    let report =
+        IrScoreDownloadReport { imported: 4, linked_existing: 3, failed: 2, ..Default::default() };
+    assert_eq!(download_status(&report), IrManualOutcomeStatus::DownloadFailed { failed: 2 });
+    let cancelled = IrScoreDownloadReport { cancelled: true, ..report.clone() };
+    assert_eq!(download_status(&cancelled), IrManualOutcomeStatus::Cancelled);
+
+    for status in [
+        IrManualOutcomeStatus::DownloadFailed { failed: report.failed },
+        IrManualOutcomeStatus::Cancelled,
+        IrManualOutcomeStatus::Error("page request failed".into()),
+    ] {
+        let outcome = IrManualOutcome {
+            op: IrManualOp::DownloadScores,
+            status,
+            progress: IrManualProgressView {
+                download_imported: report.imported,
+                download_linked: report.linked_existing,
+                download_failed: report.failed,
+                ..Default::default()
+            },
+            messages: Vec::new(),
+        };
+        for locale in AppLocale::SUPPORTED {
+            let message = outcome_message(Localizer::new(locale), &outcome);
+            assert!(
+                !message.starts_with("toast-ir-download-"),
+                "{} catalog did not resolve {message}",
+                locale.code()
+            );
+            assert!(message.contains('4') && message.contains('3') && message.contains('2'));
+        }
+    }
 }
 
 #[test]
