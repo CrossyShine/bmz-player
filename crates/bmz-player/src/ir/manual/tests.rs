@@ -4,10 +4,14 @@ use std::time::{Duration, Instant};
 use rusqlite::Connection;
 
 use super::*;
+use crate::config::profile_config::IrProviderConfig;
+use crate::ir::backfill::IrLocalUploadOptions;
 use crate::ir::sync::IrSyncReport;
 use crate::ln_policy::LnScorePolicy;
 use crate::storage::common::configure_connection;
-use crate::storage::migration::{NETWORK_MIGRATIONS, run_migrations};
+use crate::storage::migration::{
+    NETWORK_MIGRATIONS, migrate_library_db, migrate_network_db, migrate_score_db, run_migrations,
+};
 use crate::storage::network_db::{IrJobKind, NetworkDatabase, NewIrScoreJob};
 
 use super::sync::{IrManualSyncScope, sync_jobs};
@@ -199,6 +203,203 @@ async fn sync_jobs_skips_jobs_another_worker_is_sending() {
     assert!(events.iter().any(|event| matches!(event, IrManualProgress::NoQueuedJobs)));
     // 進捗なし（失敗でもない）= lease待ちとして扱われる。
     assert_eq!(full_upload_stop_reason(&outcome.report), Some(IrManualStop::WaitingForSendingJob));
+}
+
+struct UploadFixture {
+    dir: PathBuf,
+    library_db: PathBuf,
+    score_db: PathBuf,
+    network_db: PathBuf,
+    config: IrConfig,
+}
+
+impl UploadFixture {
+    fn new(name: &str) -> Self {
+        let dir = temp_dir(name);
+        let library_db = dir.join("library.db");
+        let score_db = dir.join("score.db");
+        let network_db = dir.join("network.db");
+        migrate_library_db(&library_db).unwrap();
+        migrate_score_db(&score_db).unwrap();
+        migrate_network_db(&network_db).unwrap();
+
+        let mut target = IrProviderConfig::bmz_ir();
+        target.provider_key = "target-a".to_string();
+        target.enabled = true;
+        target.account_id = "account-a".to_string();
+        let config = IrConfig {
+            primary_provider: "target-a".to_string(),
+            providers: vec![target],
+            ..IrConfig::default()
+        };
+        Self { dir, library_db, score_db, network_db, config }
+    }
+
+    fn context(&self) -> IrManualContext<'_> {
+        IrManualContext {
+            library_db: &self.library_db,
+            network_db: &self.network_db,
+            sync: IrSyncContext {
+                score_db: &self.score_db,
+                profile_root: &self.dir,
+                logs_dir: &self.dir,
+                ir_config: &self.config,
+            },
+        }
+    }
+
+    fn seed_target_sending_and_unrelated_pending(&self) -> Vec<(i64, &'static str)> {
+        let mut db = NetworkDatabase::open(&self.network_db).unwrap();
+        let now = now_unix_seconds();
+        let target_score =
+            enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Score, 1, now);
+        let claimed = db
+            .claim_pending_ir_score_jobs_for_kind(
+                "target-a",
+                "account-a",
+                IrJobKind::Score,
+                now,
+                1,
+                true,
+            )
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, target_score);
+
+        let other_provider =
+            enqueue_upload_job(&mut db, "unconfigured", "other", IrJobKind::Score, 2, now);
+        let other_account =
+            enqueue_upload_job(&mut db, "target-a", "account-b", IrJobKind::Score, 3, now);
+        let replay =
+            enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Replay, 4, now);
+        let course =
+            enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Course, 5, now);
+        vec![
+            (target_score, "sending"),
+            (other_provider, "pending"),
+            (other_account, "pending"),
+            (replay, "pending"),
+            (course, "pending"),
+        ]
+    }
+
+    fn seed_only_unrelated_pending(&self) -> Vec<(i64, &'static str)> {
+        let mut db = NetworkDatabase::open(&self.network_db).unwrap();
+        let now = now_unix_seconds();
+        let other_provider =
+            enqueue_upload_job(&mut db, "unconfigured", "other", IrJobKind::Score, 12, now);
+        let other_account =
+            enqueue_upload_job(&mut db, "target-a", "account-b", IrJobKind::Score, 13, now);
+        let replay =
+            enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Replay, 14, now);
+        let course =
+            enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Course, 15, now);
+        vec![
+            (other_provider, "pending"),
+            (other_account, "pending"),
+            (replay, "pending"),
+            (course, "pending"),
+        ]
+    }
+
+    fn assert_job_statuses(&self, expected: &[(i64, &str)]) {
+        let db = NetworkDatabase::open(&self.network_db).unwrap();
+        for (job_id, expected_status) in expected {
+            let status: String = db
+                .conn()
+                .query_row("SELECT status FROM ir_score_jobs WHERE id = ?1", [job_id], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(&status, expected_status, "job {job_id}");
+        }
+    }
+}
+
+impl Drop for UploadFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn enqueue_upload_job(
+    db: &mut NetworkDatabase,
+    provider: &str,
+    account_id: &str,
+    kind: IrJobKind,
+    local_score_id: i64,
+    now: i64,
+) -> i64 {
+    db.enqueue_ir_score_job(&NewIrScoreJob {
+        provider: provider.to_string(),
+        account_id: account_id.to_string(),
+        kind,
+        local_score_id,
+        chart_sha256: [local_score_id as u8; 32],
+        ln_policy: LnScorePolicy::ForceLn,
+        payload_json: "{}".to_string(),
+        now,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn upload_local_all_waits_for_its_sending_score_without_touching_other_jobs() {
+    let fixture = UploadFixture::new("upload-all-scope");
+    let expected = fixture.seed_target_sending_and_unrelated_pending();
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let report = upload_local_all(
+        &fixture.context(),
+        &IrLocalUploadOptions::default(),
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.stop, IrManualStop::WaitingForSendingJob);
+    assert_eq!(report.remaining, 1);
+    fixture.assert_job_statuses(&expected);
+}
+
+#[tokio::test]
+async fn upload_local_batch_sync_waits_for_its_sending_score_without_touching_other_jobs() {
+    let fixture = UploadFixture::new("upload-batch-scope");
+    let expected = fixture.seed_target_sending_and_unrelated_pending();
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let report = upload_local_batch(
+        &fixture.context(),
+        &IrLocalUploadOptions::default(),
+        true,
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.stop, IrManualStop::WaitingForSendingJob);
+    assert_eq!(report.remaining, 1);
+    fixture.assert_job_statuses(&expected);
+}
+
+#[tokio::test]
+async fn empty_upload_local_batch_completes_without_touching_other_jobs() {
+    let fixture = UploadFixture::new("upload-batch-empty");
+    let expected = fixture.seed_only_unrelated_pending();
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let report = upload_local_batch(
+        &fixture.context(),
+        &IrLocalUploadOptions::default(),
+        true,
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.stop, IrManualStop::Completed);
+    assert_eq!(report.remaining, 0);
+    fixture.assert_job_statuses(&expected);
 }
 
 #[tokio::test]

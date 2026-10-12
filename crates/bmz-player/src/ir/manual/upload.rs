@@ -54,7 +54,11 @@ async fn sync_and_summarize(
     let outcome = sync_jobs(
         &ctx.sync,
         network_db,
-        IrManualSyncScope::Any,
+        IrManualSyncScope::Kind {
+            provider_key: &report.provider_key,
+            account_id: &report.account_id,
+            kind: IrJobKind::Score,
+        },
         IR_CLI_SYNC_BATCH_LIMIT,
         progress,
         cancel,
@@ -116,10 +120,14 @@ pub async fn upload_local_batch(
         )?;
         if queued > 0 {
             progress(IrManualProgress::ExistingQueued { provider_key, account_id, queued });
-            let (_, cancelled) =
+            let (sync_report, cancelled) =
                 sync_and_summarize(ctx, &mut network_db, &mut report, progress, cancel).await?;
             if cancelled {
                 report.stop = IrManualStop::Cancelled;
+            } else if (sync_report.failed > 0 || report.remaining > 0)
+                && let Some(stop) = full_upload_stop_reason(&sync_report)
+            {
+                report.stop = stop;
             }
             return Ok(report);
         }
@@ -145,10 +153,14 @@ pub async fn upload_local_batch(
     if options.dry_run || !sync_after_enqueue {
         return Ok(report);
     }
-    let (_, cancelled) =
+    let (sync_report, cancelled) =
         sync_and_summarize(ctx, &mut network_db, &mut report, progress, cancel).await?;
     if cancelled {
         report.stop = IrManualStop::Cancelled;
+    } else if (sync_report.failed > 0 || report.remaining > 0)
+        && let Some(stop) = full_upload_stop_reason(&sync_report)
+    {
+        report.stop = stop;
     }
     Ok(report)
 }

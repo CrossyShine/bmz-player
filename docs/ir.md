@@ -107,6 +107,9 @@ SHA-256 fallback でラベルを付与する。
   送信直前にdevice keyで署名し、サーバー側では `signed_backfill` として保存する。
   `source_kind`、1P/2Pの配置、実際に適用したDPオプションも送信し、ランキング用の
   `double_option` バケットとは分けて個別スコアの履歴に保持する。
+  upload-local の同期対象と進捗件数は指定provider/accountのscore jobだけに限る。
+  `--include-replay` はscore payloadにreplay upload intentを付け、score成功後にreplay jobを作る。
+  replay jobの実送信はupload-localでは行わず、通常のworkerまたは `ir sync` が処理する。
   local backfill の `pass_notes` は保存済み判定数から生成し、`empty_poor` は実ノーツ判定数に
   含めない。Failed スコアでは未処理ノーツ分を `min_bp` / `min_cb` に含めた状態で送るため、
   download-scores は同じ `pass_notes` からローカル履歴を復元できる。旧backfillで
