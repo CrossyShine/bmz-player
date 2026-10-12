@@ -8,10 +8,12 @@ use crate::ir::backfill::{
 };
 use crate::ir::sync::{IR_CLI_SYNC_BATCH_LIMIT, IrSyncReport};
 use crate::storage::library_db::LibraryDatabase;
-use crate::storage::network_db::{IrJobKind, NetworkDatabase};
+use crate::storage::network_db::{IrJobKind, IrJobRetryFilter, NetworkDatabase};
 use crate::storage::score_db::ScoreDatabase;
 
-use super::sync::{IrManualSyncScope, sync_jobs};
+use super::sync::{
+    IrFailureBreaker, IrManualSyncOutcome, IrManualSyncRetry, IrManualSyncScope, sync_jobs_with,
+};
 use super::{
     IrManualCancel, IrManualContext, IrManualProgress, IrManualProgressSink, IrManualStop,
     IrManualUploadReport, is_cancelled, now_unix_seconds,
@@ -49,15 +51,17 @@ pub(crate) fn full_upload_stop_reason(sync_report: &IrSyncReport) -> Option<IrMa
     None
 }
 
-/// 1回分のsyncを実行し、集計・remaining通知まで行う。中断されたら true。
+/// 1回分のsyncを実行し、集計・remaining通知まで行う。
 async fn sync_and_summarize(
     ctx: &IrManualContext<'_>,
     network_db: &mut NetworkDatabase,
     report: &mut IrManualUploadReport,
+    retry: IrManualSyncRetry,
+    breaker: Option<&mut IrFailureBreaker>,
     progress: IrManualProgressSink<'_>,
     cancel: &IrManualCancel,
-) -> Result<(IrSyncReport, bool)> {
-    let outcome = sync_jobs(
+) -> Result<IrManualSyncOutcome> {
+    let outcome = sync_jobs_with(
         &ctx.sync,
         network_db,
         IrManualSyncScope::Kind {
@@ -66,6 +70,8 @@ async fn sync_and_summarize(
             kind: IrJobKind::Score,
         },
         IR_CLI_SYNC_BATCH_LIMIT,
+        retry,
+        breaker,
         progress,
         cancel,
     )
@@ -87,7 +93,7 @@ async fn sync_and_summarize(
         remaining,
         messages: outcome.report.messages.clone(),
     });
-    Ok((outcome.report, outcome.cancelled))
+    Ok(outcome)
 }
 
 fn open_dbs(
@@ -126,15 +132,17 @@ pub async fn upload_local_batch(
         )?;
         if queued > 0 {
             progress(IrManualProgress::ExistingQueued { provider_key, account_id, queued });
-            let (sync_report, cancelled) =
-                sync_and_summarize(ctx, &mut network_db, &mut report, progress, cancel).await?;
-            if cancelled {
-                report.stop = IrManualStop::Cancelled;
-            } else if (sync_report.failed > 0 || report.remaining > 0)
-                && let Some(stop) = full_upload_stop_reason(&sync_report)
-            {
-                report.stop = stop;
-            }
+            let outcome = sync_and_summarize(
+                ctx,
+                &mut network_db,
+                &mut report,
+                IrManualSyncRetry::UntilFirstFailure,
+                None,
+                progress,
+                cancel,
+            )
+            .await?;
+            report.stop = batch_stop_reason(&outcome, report.remaining);
             return Ok(report);
         }
     }
@@ -159,25 +167,41 @@ pub async fn upload_local_batch(
     if options.dry_run || !sync_after_enqueue {
         return Ok(report);
     }
-    let (sync_report, cancelled) =
-        sync_and_summarize(ctx, &mut network_db, &mut report, progress, cancel).await?;
-    if cancelled {
-        report.stop = IrManualStop::Cancelled;
-    } else if (sync_report.failed > 0 || report.remaining > 0)
-        && let Some(stop) = full_upload_stop_reason(&sync_report)
-    {
-        report.stop = stop;
-    }
+    let outcome = sync_and_summarize(
+        ctx,
+        &mut network_db,
+        &mut report,
+        IrManualSyncRetry::UntilFirstFailure,
+        None,
+        progress,
+        cancel,
+    )
+    .await?;
+    report.stop = batch_stop_reason(&outcome, report.remaining);
     Ok(report)
+}
+
+fn batch_stop_reason(outcome: &IrManualSyncOutcome, remaining: u32) -> IrManualStop {
+    if outcome.cancelled {
+        return IrManualStop::Cancelled;
+    }
+    if outcome.report.failed > 0 || remaining > 0 {
+        return full_upload_stop_reason(&outcome.report).unwrap_or_default();
+    }
+    IrManualStop::Completed
 }
 
 /// `bmz ir upload-local --all` 相当。未完了jobの同期とenqueueを、候補が無くなるまで繰り返す。
 ///
-/// 失敗jobが出た場合と、他のsending jobしか残らず進捗が無い場合は、
-/// それぞれ `IrManualStop::FailedJobs` / `WaitingForSendingJob` で停止する。
+/// `run_started_at` 以降に失敗したjobは再取得しないため、1回の実行で各jobは最大1回だけ送られる。
+/// 失敗したjobは送信キューに残したまま次のjobへ進み、全件を処理し終えたら
+/// `IrManualStop::FailedJobs` で終わる。認証エラー・429・連続失敗では
+/// `IrFailureBreaker` が途中で打ち切る。他の主体がlease中のjobしか残らない場合は
+/// `WaitingForSendingJob` で止まる。再開する呼び出し側は同じ `run_started_at` を渡す。
 pub async fn upload_local_all(
     ctx: &IrManualContext<'_>,
     options: &IrLocalUploadOptions,
+    run_started_at: i64,
     progress: IrManualProgressSink<'_>,
     cancel: &IrManualCancel,
 ) -> Result<IrManualUploadReport> {
@@ -192,6 +216,9 @@ pub async fn upload_local_all(
         account_id: account_id.clone(),
         ..IrManualUploadReport::default()
     };
+    let retry = IrManualSyncRetry::OncePerRun { started_at: run_started_at };
+    let retry_filter = IrJobRetryFilter::FailedBefore(run_started_at);
+    let mut breaker = IrFailureBreaker::default();
     let mut processed = HashSet::new();
 
     loop {
@@ -201,12 +228,14 @@ pub async fn upload_local_all(
         }
         report.batches = report.batches.saturating_add(1);
         progress(IrManualProgress::FullUploadBatch { batch: report.batches });
-        let queued = network_db.unfinished_ir_score_job_count_for_kind(
+        let backlog = network_db.ir_score_job_backlog_for_kind(
             &provider_key,
             &account_id,
             IrJobKind::Score,
+            now_unix_seconds(),
+            retry_filter,
         )?;
-        if queued > 0 {
+        if backlog.claimable > 0 {
             if options.resend {
                 processed.extend(network_db.unfinished_ir_score_local_ids(
                     &provider_key,
@@ -217,20 +246,39 @@ pub async fn upload_local_all(
             progress(IrManualProgress::ExistingQueued {
                 provider_key: provider_key.clone(),
                 account_id: account_id.clone(),
-                queued,
+                queued: backlog.claimable,
             });
-            let (sync_report, cancelled) =
-                sync_and_summarize(ctx, &mut network_db, &mut report, progress, cancel).await?;
-            if cancelled {
-                report.stop = IrManualStop::Cancelled;
-                return Ok(report);
-            }
-            if (sync_report.failed > 0 || report.remaining > 0)
-                && let Some(stop) = full_upload_stop_reason(&sync_report)
-            {
+            let outcome = sync_and_summarize(
+                ctx,
+                &mut network_db,
+                &mut report,
+                retry,
+                Some(&mut breaker),
+                progress,
+                cancel,
+            )
+            .await?;
+            if let Some(stop) = full_run_interruption(&outcome) {
                 report.stop = stop;
                 return Ok(report);
             }
+            if outcome.report.submitted.saturating_add(outcome.report.failed) == 0
+                && network_db
+                    .ir_score_job_backlog_for_kind(
+                        &provider_key,
+                        &account_id,
+                        IrJobKind::Score,
+                        now_unix_seconds(),
+                        retry_filter,
+                    )?
+                    .claimable
+                    > 0
+            {
+                // claimできるはずのjobを取得できず進捗が無い。他の主体の処理を待つ。
+                report.stop = IrManualStop::WaitingForSendingJob;
+                return Ok(report);
+            }
+            // 数えた直後に別の主体が処理した場合も、次のbatchで残りを数え直す。
             continue;
         }
 
@@ -253,35 +301,38 @@ pub async fn upload_local_all(
             all: true,
             limit: options.limit.max(1),
         });
-        if enqueued == 0 {
-            progress(IrManualProgress::FullUploadComplete {
-                enqueued: report.enqueued,
-                submitted: report.submitted,
-            });
-            return Ok(report);
-        }
-        if limit_reached {
-            progress(IrManualProgress::LimitReachedContinuing);
+        if enqueued > 0 {
+            if limit_reached {
+                progress(IrManualProgress::LimitReachedContinuing);
+            }
+            continue;
         }
 
-        let (sync_report, cancelled) =
-            sync_and_summarize(ctx, &mut network_db, &mut report, progress, cancel).await?;
-        if cancelled {
-            report.stop = IrManualStop::Cancelled;
+        // 新しい候補もclaimできるjobも無い。lease中のjobが残っていれば完了を待つ。
+        report.remaining = network_db.unfinished_ir_score_job_count_for_kind(
+            &provider_key,
+            &account_id,
+            IrJobKind::Score,
+        )?;
+        if backlog.leased > 0 {
+            report.stop = IrManualStop::WaitingForSendingJob;
             return Ok(report);
         }
-        if (sync_report.failed > 0 || report.remaining > 0)
-            && let Some(stop) = full_upload_stop_reason(&sync_report)
-        {
-            report.stop = stop;
-            return Ok(report);
+        progress(IrManualProgress::FullUploadComplete {
+            enqueued: report.enqueued,
+            submitted: report.submitted,
+        });
+        if report.failed > 0 {
+            report.stop = IrManualStop::FailedJobs { failed: report.failed };
         }
-        if report.remaining == 0 && !limit_reached {
-            progress(IrManualProgress::FullUploadComplete {
-                enqueued: report.enqueued,
-                submitted: report.submitted,
-            });
-            return Ok(report);
-        }
+        return Ok(report);
     }
+}
+
+/// `--all` の同期を途中で打ち切る理由。続行できるなら `None`。
+fn full_run_interruption(outcome: &IrManualSyncOutcome) -> Option<IrManualStop> {
+    if outcome.cancelled {
+        return Some(IrManualStop::Cancelled);
+    }
+    outcome.stop
 }

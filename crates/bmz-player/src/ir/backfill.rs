@@ -829,4 +829,4 @@ fn device_type_from_str(value: &str) -> InputDeviceKind {
 
 #[cfg(test)]
 #[path = "backfill/tests.rs"]
-mod tests;
+pub(crate) mod tests;

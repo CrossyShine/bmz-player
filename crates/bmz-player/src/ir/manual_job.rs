@@ -141,6 +141,14 @@ pub enum IrManualOutcomeStatus {
     FailedJobs {
         failed: u32,
     },
+    /// 送信が続けて失敗したため一括送信を打ち切った。
+    ConsecutiveFailures {
+        consecutive: u32,
+    },
+    /// IRの認証に失敗したため一括送信を打ち切った。
+    Unauthorized,
+    /// IRサーバーが送信を制限したため一括送信を打ち切った。
+    RateLimited,
     /// 他のsending jobが解消せず、待機の上限に達した。
     WaitingTimedOut,
     Error(String),
@@ -690,9 +698,11 @@ async fn run_op_async(
             let options = IrLocalUploadOptions::default();
             let mut messages = Vec::new();
             let mut waiting_since = Instant::now();
+            // lease待ちから再開しても、この実行で失敗したjobを再送しない。
+            let run_started_at = now_unix_seconds();
             loop {
                 let report: IrManualUploadReport =
-                    upload_local_all(&ctx, &options, &mut *sink, cancel).await?;
+                    upload_local_all(&ctx, &options, run_started_at, &mut *sink, cancel).await?;
                 messages.extend(report.messages.iter().cloned());
                 match report.stop {
                     IrManualStop::Completed => {
@@ -703,6 +713,18 @@ async fn run_op_async(
                     }
                     IrManualStop::FailedJobs { failed } => {
                         return Ok(outcome(IrManualOutcomeStatus::FailedJobs { failed }, messages));
+                    }
+                    IrManualStop::ConsecutiveFailures { consecutive } => {
+                        return Ok(outcome(
+                            IrManualOutcomeStatus::ConsecutiveFailures { consecutive },
+                            messages,
+                        ));
+                    }
+                    IrManualStop::Unauthorized => {
+                        return Ok(outcome(IrManualOutcomeStatus::Unauthorized, messages));
+                    }
+                    IrManualStop::RateLimited { .. } => {
+                        return Ok(outcome(IrManualOutcomeStatus::RateLimited, messages));
                     }
                     IrManualStop::WaitingForSendingJob => {
                         // 進捗があった試行は待機時間を数え直す。
@@ -901,6 +923,13 @@ pub fn outcome_message(text: Localizer, outcome: &IrManualOutcome) -> String {
             text.format("toast-ir-manual-error", &args)
         }
         IrManualOutcomeStatus::WaitingTimedOut => text.text("toast-ir-manual-waiting-timeout"),
+        IrManualOutcomeStatus::ConsecutiveFailures { consecutive } => {
+            args.set("consecutive", i64::from(*consecutive));
+            args.set("submitted", i64::from(progress.submitted));
+            text.format("toast-ir-manual-consecutive-failures", &args)
+        }
+        IrManualOutcomeStatus::Unauthorized => text.text("toast-ir-manual-unauthorized"),
+        IrManualOutcomeStatus::RateLimited => text.text("toast-ir-manual-rate-limited"),
         IrManualOutcomeStatus::FailedJobs { failed } if !resend => {
             args.set("failed", i64::from(*failed));
             text.format("toast-ir-manual-failed-jobs", &args)

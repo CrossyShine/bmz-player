@@ -1,3 +1,4 @@
+use super::download::now_unix_seconds;
 use super::output::{no_cancel, print_progress};
 use super::*;
 use crate::ir::manual::{
@@ -43,7 +44,7 @@ pub(super) async fn upload_local(
         return Ok(());
     }
 
-    let report = upload_local_all(&ctx, &options, &mut sink, &cancel).await?;
+    let report = upload_local_all(&ctx, &options, now_unix_seconds(), &mut sink, &cancel).await?;
     if report.skipped_resend_payload_unavailable > 0 {
         bail!(
             "{} succeeded score(s) cannot be resent because their original request payload is unavailable",
@@ -52,8 +53,23 @@ pub(super) async fn upload_local(
     }
     match report.stop {
         IrManualStop::FailedJobs { failed } => bail!(
-            "full local upload stopped after {} submissions because {failed} jobs failed",
+            "full local upload finished with {} submissions and {failed} failed job(s); failed jobs stay queued for retry",
             report.submitted
+        ),
+        IrManualStop::ConsecutiveFailures { consecutive } => bail!(
+            "full local upload stopped after {consecutive} consecutive failures ({} submitted); check the IR server and network, then rerun",
+            report.submitted
+        ),
+        IrManualStop::Unauthorized => bail!(
+            "full local upload stopped because the IR account is not authorized ({} submitted); run `bmz ir login` and rerun",
+            report.submitted
+        ),
+        IrManualStop::RateLimited { retry_after_seconds } => bail!(
+            "full local upload stopped because the IR server is rate limiting submissions ({} submitted); rerun{}",
+            report.submitted,
+            retry_after_seconds
+                .map(|seconds| format!(" after {seconds} seconds"))
+                .unwrap_or_else(|| " later".to_string())
         ),
         IrManualStop::WaitingForSendingJob => bail!(
             "full local upload is waiting for an existing sending job; rerun after its 5-minute lease expires"

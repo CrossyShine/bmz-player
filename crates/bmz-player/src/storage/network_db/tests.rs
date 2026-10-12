@@ -920,7 +920,7 @@ fn claiming_ir_jobs_for_kind_keeps_other_jobs_pending() {
             IrJobKind::Attestation,
             100,
             10,
-            true,
+            IrJobRetryFilter::IgnoreBackoff,
         )
         .unwrap();
     assert_eq!(pending.iter().map(|job| job.id).collect::<Vec<_>>(), vec![attestation]);
@@ -932,7 +932,7 @@ fn claiming_ir_jobs_for_kind_keeps_other_jobs_pending() {
             IrJobKind::Attestation,
             100,
             10,
-            true,
+            IrJobRetryFilter::IgnoreBackoff,
         )
         .unwrap();
     assert_eq!(claimed.iter().map(|job| job.id).collect::<Vec<_>>(), vec![attestation]);
@@ -1309,4 +1309,54 @@ fn failed_job_is_claimed_for_resend_despite_backoff_but_never_twice() {
             .len(),
         1
     );
+}
+
+#[test]
+fn failed_before_retry_filter_claims_each_failed_job_once_per_run() {
+    let mut db = open_network_db();
+    let old_failure = enqueue_test_job(&mut db, 1, 100);
+    let fresh_failure = enqueue_test_job(&mut db, 2, 100);
+    let pending = enqueue_test_job(&mut db, 3, 100);
+    let leased = enqueue_test_job(&mut db, 4, 100);
+    // 実行開始(1_000)より前の失敗は再試行時刻(長いbackoff)を無視して対象にし、
+    // 実行中の失敗は対象外にする。
+    db.mark_ir_score_job_failed(old_failure, 900, "old", Some(86_400)).unwrap();
+    db.mark_ir_score_job_failed(fresh_failure, 1_000, "this run", None).unwrap();
+    db.conn()
+        .execute(
+            "UPDATE ir_score_jobs SET status = 'sending', updated_at = 1000 WHERE id = ?1",
+            [leased],
+        )
+        .unwrap();
+
+    let retry = IrJobRetryFilter::FailedBefore(1_000);
+    let backlog = db
+        .ir_score_job_backlog_for_kind("bmz-official", "account-1", IrJobKind::Score, 1_010, retry)
+        .unwrap();
+    assert_eq!(backlog, IrScoreJobBacklog { claimable: 2, leased: 1, deferred: 1 });
+
+    let claimed = db
+        .claim_pending_ir_score_jobs_for_kind(
+            "bmz-official",
+            "account-1",
+            IrJobKind::Score,
+            1_010,
+            10,
+            retry,
+        )
+        .unwrap();
+    let mut claimed_ids = claimed.iter().map(|job| job.id).collect::<Vec<_>>();
+    claimed_ids.sort_unstable();
+    assert_eq!(claimed_ids, vec![old_failure, pending]);
+
+    let respect = db
+        .ir_score_job_backlog_for_kind(
+            "bmz-official",
+            "account-1",
+            IrJobKind::Score,
+            1_010,
+            IrJobRetryFilter::RespectBackoff,
+        )
+        .unwrap();
+    assert_eq!(respect, IrScoreJobBacklog { claimable: 0, leased: 3, deferred: 1 });
 }

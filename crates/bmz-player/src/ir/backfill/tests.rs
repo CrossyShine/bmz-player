@@ -35,7 +35,7 @@ fn test_library_db() -> LibraryDatabase {
     LibraryDatabase::from_connection(connection)
 }
 
-fn test_playable_chart(title: &str) -> PlayableChart {
+pub(crate) fn test_playable_chart(title: &str) -> PlayableChart {
     PlayableChart {
         identity: compute_chart_identity(title.as_bytes()),
         metadata: ChartMetadata { title: title.to_string(), ..Default::default() },

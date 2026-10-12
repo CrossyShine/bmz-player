@@ -8,8 +8,8 @@ use tokio::sync::Mutex;
 
 use crate::config::profile_config::{IrConfig, IrProviderConfig};
 use crate::storage::network_db::{
-    IrJobKind, IrScoreJobRecord, IrScoreJobStatus, NetworkDatabase, NewIrScoreJob,
-    NewIrScoreSubmission,
+    IrJobKind, IrJobRetryFilter, IrScoreJobRecord, IrScoreJobStatus, NetworkDatabase,
+    NewIrScoreJob, NewIrScoreSubmission,
 };
 use crate::storage::score_db::ScoreDatabase;
 
@@ -30,6 +30,40 @@ pub struct IrSyncReport {
     /// 古い試行の応答を今回のリザルトへ表示してしまう。Result 側が今回の
     /// score_history_id と照合できるよう、job の識別子を一緒に保持する。
     pub included_rankings: Vec<IrIncludedRanking>,
+    /// `failed` の内訳。送信順に並ぶ。
+    pub failures: Vec<IrSyncFailure>,
+}
+
+impl IrSyncReport {
+    pub(crate) fn record_failure(
+        &mut self,
+        job_id: i64,
+        class: IrSyncFailureClass,
+        message: String,
+    ) {
+        self.failed += 1;
+        self.messages.push(message);
+        self.failures.push(IrSyncFailure { job_id, class });
+    }
+}
+
+/// 送信失敗の性質。手動の一括送信が次のjobへ進むか止まるかの判断に使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrSyncFailureClass {
+    /// そのjobの内容に起因する失敗（4xxの検証エラー、payload不正など）。他のjobは送れる見込みがある。
+    Job,
+    /// 通信障害・5xx・ローカル保存の失敗など、時間を置けば解消し得る失敗。
+    Transient,
+    /// 認証・ログイン状態・provider設定の問題。以降のjobも同じ理由で失敗する。
+    Unauthorized,
+    /// 429。サーバーが送信を制限している。
+    RateLimited { retry_after_seconds: Option<u64> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrSyncFailure {
+    pub job_id: i64,
+    pub class: IrSyncFailureClass,
 }
 
 #[derive(Debug, Clone)]
@@ -158,7 +192,7 @@ pub async fn sync_pending_ir_jobs(
         ir_config,
         now,
         limit,
-        ignore_retry_backoff,
+        IrJobRetryFilter::from_ignore_backoff(ignore_retry_backoff),
         throttle,
         None,
     )
@@ -174,7 +208,7 @@ pub async fn sync_pending_ir_jobs_filtered(
     filter: IrSyncJobFilter<'_>,
     now: i64,
     limit: u32,
-    ignore_retry_backoff: bool,
+    retry: IrJobRetryFilter,
     throttle: IrSyncThrottle,
 ) -> Result<IrSyncReport> {
     sync_pending_ir_jobs_with_filter(
@@ -185,7 +219,7 @@ pub async fn sync_pending_ir_jobs_filtered(
         ir_config,
         now,
         limit,
-        ignore_retry_backoff,
+        retry,
         throttle,
         Some(filter),
     )

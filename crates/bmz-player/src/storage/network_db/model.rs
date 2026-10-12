@@ -38,6 +38,48 @@ impl IrScoreJobStatus {
     }
 }
 
+/// job取得時に、`pending` / `failed` jobのどれを再試行の対象にするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrJobRetryFilter {
+    /// `next_attempt_at` に達したjobだけ。
+    RespectBackoff,
+    /// `failed` jobも再試行時刻に関係なく対象にする。
+    IgnoreBackoff,
+    /// 再試行時刻は無視するが、`updated_at` が指定時刻以降の `failed` jobは除く。
+    /// 1回の手動実行で各jobを最大1回だけ送るために使う（失敗時に `updated_at` が進む）。
+    FailedBefore(i64),
+}
+
+impl IrJobRetryFilter {
+    pub const fn from_ignore_backoff(ignore_retry_backoff: bool) -> Self {
+        if ignore_retry_backoff { Self::IgnoreBackoff } else { Self::RespectBackoff }
+    }
+
+    /// `?1` を現在時刻として参照するSQL条件。
+    pub(super) fn sql_condition(self) -> String {
+        match self {
+            Self::RespectBackoff => {
+                "status IN ('pending', 'failed') AND next_attempt_at <= ?1".to_string()
+            }
+            Self::IgnoreBackoff => "status IN ('pending', 'failed')".to_string(),
+            Self::FailedBefore(since) => {
+                format!("status = 'pending' OR (status = 'failed' AND updated_at < {since})")
+            }
+        }
+    }
+}
+
+/// 指定provider/account/kindの未完了jobの内訳。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IrScoreJobBacklog {
+    /// 今claimできるjob（期限切れの `sending` を含む）。
+    pub claimable: u32,
+    /// 別の主体がlease中の `sending` job。
+    pub leased: u32,
+    /// 再試行条件を満たさない `failed` job。
+    pub deferred: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct IrScoreJobRecord {
     pub id: i64,

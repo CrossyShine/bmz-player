@@ -10,7 +10,7 @@ use crate::ir::sync::{
     IR_CLI_SYNC_JOB_SPACING_MS, IrSyncJobFilter, IrSyncThrottle, sync_pending_ir_jobs_filtered,
 };
 use crate::storage::network_db::{
-    IrJobKind, IrScoreJobListFilter, IrScoreJobStatus, NetworkDatabase,
+    IrJobKind, IrJobRetryFilter, IrScoreJobListFilter, IrScoreJobStatus, NetworkDatabase,
 };
 
 use super::{
@@ -48,7 +48,7 @@ pub async fn resend_job(
         IrSyncJobFilter { provider_key, account_id, kind, local_score_id: Some(local_score_id) },
         now_unix_seconds(),
         1,
-        true,
+        IrJobRetryFilter::IgnoreBackoff,
         IrSyncThrottle::none(),
     )
     .await?;

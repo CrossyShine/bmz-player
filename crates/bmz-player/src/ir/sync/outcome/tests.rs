@@ -60,6 +60,53 @@ fn failures_preserve_retry_after_and_record_each_job_once() {
     assert!(logs.iter().all(|entry| entry["status"] == "failed" && entry["response"].is_null()));
     assert!(report.messages[2].contains("replay upload failed:"));
     assert!(report.messages[3].contains("score attestation failed:"));
+    assert_eq!(report.failures.len(), 4);
+    assert!(report.failures.iter().all(|failure| failure.class
+        == IrSyncFailureClass::RateLimited { retry_after_seconds: Some(123) }));
+}
+
+#[test]
+fn submission_errors_are_classified_for_bulk_upload_decisions() {
+    let http = |status: reqwest::StatusCode| {
+        crate::ir::http_error::http_response_error("test", status, "{}", None).context("upstream")
+    };
+    for status in [reqwest::StatusCode::UNAUTHORIZED, reqwest::StatusCode::FORBIDDEN] {
+        assert_eq!(classify_submission_error(&http(status)), IrSyncFailureClass::Unauthorized);
+    }
+    assert_eq!(
+        classify_submission_error(&http(reqwest::StatusCode::TOO_MANY_REQUESTS)),
+        IrSyncFailureClass::RateLimited { retry_after_seconds: None }
+    );
+    for status in [
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        reqwest::StatusCode::BAD_GATEWAY,
+        reqwest::StatusCode::REQUEST_TIMEOUT,
+    ] {
+        assert_eq!(classify_submission_error(&http(status)), IrSyncFailureClass::Transient);
+    }
+    for status in [
+        reqwest::StatusCode::BAD_REQUEST,
+        reqwest::StatusCode::CONFLICT,
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+    ] {
+        assert_eq!(classify_submission_error(&http(status)), IrSyncFailureClass::Job);
+    }
+    let local = anyhow::anyhow!("invalid payload").context("failed to parse stored IR payload");
+    assert_eq!(classify_submission_error(&local), IrSyncFailureClass::Job);
+}
+
+#[tokio::test]
+async fn connection_errors_are_transient() {
+    // 予約済みのdiscardポートへの接続は即座に拒否される。
+    let error = reqwest::Client::new()
+        .get("http://127.0.0.1:9/")
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+        .context("submit")
+        .unwrap_err();
+    assert_eq!(classify_submission_error(&error), IrSyncFailureClass::Transient);
 }
 
 #[test]

@@ -96,6 +96,11 @@ impl JobCompletion<'_> {
             },
         };
         let message = format!("{prefix}{error:#}");
+        let class = match stage {
+            // サーバーは受理済みで、ローカル保存だけが失敗した。
+            FailureStage::Completion(_) => IrSyncFailureClass::Transient,
+            FailureStage::Submission => classify_submission_error(&error),
+        };
         let (remote_id, request, response) =
             receipt.map_or(("", self.job.payload_json.as_str(), ""), |receipt| {
                 (
@@ -120,8 +125,7 @@ impl JobCompletion<'_> {
             &message,
             retry_after_seconds_from_error(&error),
         )?;
-        self.report.failed += 1;
-        self.report.messages.push(format!("job {}: {message}", self.job.id));
+        self.report.record_failure(self.job.id, class, format!("job {}: {message}", self.job.id));
         tracing::warn!(job_id = self.job.id, provider = self.job.provider, %message, "{event}");
         Ok(())
     }
@@ -218,3 +222,33 @@ impl JobCompletion<'_> {
 
 #[cfg(test)]
 mod tests;
+
+/// 送信エラーを、手動一括送信が続行できるかどうかの観点で分類する。
+pub(super) fn classify_submission_error(error: &anyhow::Error) -> IrSyncFailureClass {
+    let status = crate::ir::http_error::status_code_from_error(error).or_else(|| {
+        error.chain().find_map(|cause| cause.downcast_ref::<reqwest::Error>()?.status())
+    });
+    match status {
+        Some(status)
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN =>
+        {
+            IrSyncFailureClass::Unauthorized
+        }
+        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => IrSyncFailureClass::RateLimited {
+            retry_after_seconds: retry_after_seconds_from_error(error),
+        },
+        Some(status)
+            if status.is_server_error() || status == reqwest::StatusCode::REQUEST_TIMEOUT =>
+        {
+            IrSyncFailureClass::Transient
+        }
+        Some(_) => IrSyncFailureClass::Job,
+        // ステータスの無いreqwestエラーは接続・タイムアウト等の通信障害。
+        None if error.chain().any(|cause| cause.is::<reqwest::Error>()) => {
+            IrSyncFailureClass::Transient
+        }
+        // payloadの解析・署名など、そのjobに固有のローカルな失敗。
+        None => IrSyncFailureClass::Job,
+    }
+}

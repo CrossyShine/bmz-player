@@ -21,7 +21,10 @@ mod upload;
 
 pub use download::download_scores;
 pub use resend::{IrManualResendReport, resend_failed_jobs, resend_job};
-pub use sync::{IrManualSyncOutcome, IrManualSyncScope, sync_jobs};
+pub use sync::{
+    IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT, IrFailureBreaker, IrManualSyncOutcome, IrManualSyncRetry,
+    IrManualSyncScope, sync_jobs, sync_jobs_with,
+};
 pub use upload::{upload_local_all, upload_local_batch};
 
 pub type IrManualCancel = watch::Receiver<bool>;
@@ -106,9 +109,20 @@ pub enum IrManualStop {
     #[default]
     Completed,
     Cancelled,
-    /// 送信に失敗したjobがあるため停止した。再実行しても同じjobは再試行待ちになる。
+    /// 送信に失敗したjobが残った。`--all` では残りのjobを処理し終えてから、
+    /// それ以外では失敗した時点でこの状態になる。失敗jobは送信キューに残り再送できる。
     FailedJobs {
         failed: u32,
+    },
+    /// 送信が `consecutive` 件続けて失敗したため打ち切った（サーバー障害・通信断の疑い）。
+    ConsecutiveFailures {
+        consecutive: u32,
+    },
+    /// 認証・ログイン状態の問題で、以降のjobも送れないため打ち切った。
+    Unauthorized,
+    /// サーバーが送信を制限している（429）ため打ち切った。
+    RateLimited {
+        retry_after_seconds: Option<u64>,
     },
     /// 進捗が無かった。他プロセス・常駐workerがsending中のjobを持っており、
     /// lease（5分）が切れるか完了するまで待てば再試行できる。

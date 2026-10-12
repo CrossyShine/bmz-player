@@ -12,7 +12,7 @@ use crate::storage::common::configure_connection;
 use crate::storage::migration::{
     NETWORK_MIGRATIONS, migrate_library_db, migrate_network_db, migrate_score_db, run_migrations,
 };
-use crate::storage::network_db::{IrJobKind, NetworkDatabase, NewIrScoreJob};
+use crate::storage::network_db::{IrJobKind, IrJobRetryFilter, NetworkDatabase, NewIrScoreJob};
 
 use super::sync::{IrManualSyncScope, sync_jobs};
 use super::upload::full_upload_stop_reason;
@@ -260,7 +260,7 @@ impl UploadFixture {
                 IrJobKind::Score,
                 now,
                 1,
-                true,
+                IrJobRetryFilter::IgnoreBackoff,
             )
             .unwrap();
         assert_eq!(claimed.len(), 1);
@@ -373,6 +373,7 @@ async fn upload_local_all_waits_for_its_sending_score_without_touching_other_job
     let report = upload_local_all(
         &fixture.context(),
         &IrLocalUploadOptions::default(),
+        now_unix_seconds(),
         &mut |_| {},
         &cancel,
     )
@@ -522,6 +523,7 @@ async fn upload_local_all_resend_finishes_two_histories_once_with_preexisting_qu
                 limit: 1,
                 ..Default::default()
             },
+            now_unix_seconds(),
             &mut progress,
             &cancel,
         ),
@@ -629,4 +631,252 @@ async fn resend_failed_jobs_only_targets_failed_jobs_and_can_be_cancelled() {
     .await
     .unwrap();
     assert_eq!((report.targeted, report.failed, report.cancelled), (3, 3, false));
+}
+
+impl UploadFixture {
+    fn sign_in(&self) {
+        crate::ir::credentials::save_credentials(
+            &self.dir,
+            &crate::ir::credentials::IrStoredCredentials {
+                provider: "target-a".into(),
+                account_id: "account-a".into(),
+                display_name: String::new(),
+                access_token: "token".into(),
+                refresh_token: String::new(),
+                expires_at: None,
+            },
+        )
+        .unwrap();
+    }
+
+    /// ライブラリに譜面を登録し、そのhashを返す（local backfillの候補にするため）。
+    fn seed_chart(&self, title: &str) -> [u8; 32] {
+        let chart = crate::ir::backfill::tests::test_playable_chart(title);
+        let mut library =
+            crate::storage::library_db::LibraryDatabase::open(&self.library_db).unwrap();
+        library
+            .upsert_chart_import(&crate::storage::library_db::ChartImportRecord {
+                root_id: None,
+                file_path: std::path::Path::new("/fixture/song.bms"),
+                file_size: 1,
+                modified_at: 1,
+                scanned_at: 1,
+                chart: &chart,
+            })
+            .unwrap();
+        chart.identity.file_sha256
+    }
+
+    fn job_state(&self, job_id: i64) -> (String, u32) {
+        let db = NetworkDatabase::open(&self.network_db).unwrap();
+        db.conn()
+            .query_row(
+                "SELECT status, attempt_count FROM ir_score_jobs WHERE id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+}
+
+/// 対象provider/accountのpending score jobだけを、送信せずに成功扱いにする。
+fn complete_only_pending_target_scores(network_path: &std::path::Path, observed: &mut Vec<i64>) {
+    let mut db = NetworkDatabase::open(network_path).unwrap();
+    let now = now_unix_seconds();
+    let jobs = db.pending_ir_score_jobs_ignoring_backoff(now, 100).unwrap();
+    for job in jobs.into_iter().filter(|job| {
+        job.status == "pending"
+            && job.provider == "target-a"
+            && job.account_id == "account-a"
+            && job.kind == IrJobKind::Score
+    }) {
+        observed.push(job.local_score_id);
+        db.complete_ir_score_job(
+            &crate::storage::network_db::NewIrScoreSubmission {
+                job_id: job.id,
+                provider: job.provider,
+                account_id: job.account_id,
+                kind: job.kind,
+                local_score_id: job.local_score_id,
+                remote_score_id: format!("mock-remote-{}", job.local_score_id),
+                status: "succeeded".into(),
+                submitted_at: now,
+                log_path: String::new(),
+                error: String::new(),
+            },
+            None,
+            "{}",
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn upload_local_all_sends_new_scores_past_failing_jobs_and_tries_each_once() {
+    let fixture = UploadFixture::new("upload-all-past-failures");
+    fixture.sign_in();
+    let chart = fixture.seed_chart("upload-all-past-failures");
+    fixture.seed_local_history(301, chart, 100);
+    fixture.seed_local_history(302, chart, 200);
+    let now = now_unix_seconds();
+    let mut db = NetworkDatabase::open(&fixture.network_db).unwrap();
+    // 解析できないpayloadは送信前にローカルで失敗する（内容起因の失敗）。
+    let old_failure =
+        enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Score, 201, now);
+    db.mark_ir_score_job_failed(old_failure, now - 100, "old", Some(86_400)).unwrap();
+    let pending_failure =
+        enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Score, 202, now);
+    drop(db);
+
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let mut observed = Vec::new();
+    let mut progress = |event| {
+        if let IrManualProgress::FullUploadBatch { batch } = &event {
+            assert!(*batch <= 5, "upload_local_all did not finish in a bounded number of batches");
+        }
+        if matches!(event, IrManualProgress::Enqueued { all: true, .. }) {
+            complete_only_pending_target_scores(&fixture.network_db, &mut observed);
+        }
+    };
+    let report = tokio::time::timeout(
+        Duration::from_secs(10),
+        upload_local_all(
+            &fixture.context(),
+            &IrLocalUploadOptions::default(),
+            now,
+            &mut progress,
+            &cancel,
+        ),
+    )
+    .await
+    .expect("full upload should terminate")
+    .unwrap();
+
+    assert_eq!(report.stop, IrManualStop::FailedJobs { failed: 2 });
+    assert_eq!(report.failed, 2);
+    assert_eq!(report.enqueued, 2);
+    assert_eq!(observed, [301, 302]);
+    // 長いbackoff中の既存失敗jobも1回だけ再送し、同じ実行内では取り直さない。
+    assert_eq!(fixture.job_state(old_failure), ("failed".to_string(), 2));
+    assert_eq!(fixture.job_state(pending_failure), ("failed".to_string(), 1));
+
+    // 失敗jobは残したまま、次の実行では再び1回ずつ試す。
+    // 前回の失敗を次の実行開始より前の時刻にする（秒単位の時計を待たないため）。
+    NetworkDatabase::open(&fixture.network_db)
+        .unwrap()
+        .conn()
+        .execute(
+            "UPDATE ir_score_jobs SET updated_at = updated_at - 10 WHERE status = 'failed'",
+            [],
+        )
+        .unwrap();
+    let report = upload_local_all(
+        &fixture.context(),
+        &IrLocalUploadOptions::default(),
+        now_unix_seconds(),
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.stop, IrManualStop::FailedJobs { failed: 2 });
+    assert_eq!(report.enqueued, 0);
+    assert_eq!(fixture.job_state(old_failure), ("failed".to_string(), 3));
+}
+
+#[tokio::test]
+async fn upload_local_all_stops_after_consecutive_failures() {
+    let fixture = UploadFixture::new("upload-all-consecutive");
+    fixture.sign_in();
+    let now = now_unix_seconds();
+    let mut db = NetworkDatabase::open(&fixture.network_db).unwrap();
+    let jobs = (1..=IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT + 1)
+        .map(|id| {
+            enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Score, id.into(), now)
+        })
+        .collect::<Vec<_>>();
+    drop(db);
+
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let report = upload_local_all(
+        &fixture.context(),
+        &IrLocalUploadOptions::default(),
+        now,
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        report.stop,
+        IrManualStop::ConsecutiveFailures { consecutive: IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT }
+    );
+    assert_eq!(report.failed, IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT);
+    let statuses = jobs.iter().map(|job| fixture.job_state(*job).0).collect::<Vec<_>>();
+    assert_eq!(statuses.iter().filter(|status| *status == "failed").count(), 10);
+    assert_eq!(statuses.iter().filter(|status| *status == "pending").count(), 1);
+}
+
+#[tokio::test]
+async fn upload_local_all_stops_immediately_when_not_signed_in() {
+    let fixture = UploadFixture::new("upload-all-unauthorized");
+    let now = now_unix_seconds();
+    let mut db = NetworkDatabase::open(&fixture.network_db).unwrap();
+    let first = enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Score, 1, now);
+    let second = enqueue_upload_job(&mut db, "target-a", "account-a", IrJobKind::Score, 2, now);
+    drop(db);
+
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let report = upload_local_all(
+        &fixture.context(),
+        &IrLocalUploadOptions::default(),
+        now,
+        &mut |_| {},
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.stop, IrManualStop::Unauthorized);
+    assert_eq!(report.failed, 1);
+    let mut statuses = [fixture.job_state(first).0, fixture.job_state(second).0];
+    statuses.sort();
+    assert_eq!(statuses, ["failed".to_string(), "pending".to_string()]);
+}
+
+#[test]
+fn failure_breaker_resets_on_success_and_trips_on_fatal_classes() {
+    use crate::ir::sync::{IrSyncFailure, IrSyncFailureClass};
+    let failed = |class| IrSyncReport {
+        failed: 1,
+        failures: vec![IrSyncFailure { job_id: 1, class }],
+        ..Default::default()
+    };
+    let succeeded = IrSyncReport { submitted: 1, ..Default::default() };
+
+    let mut breaker = IrFailureBreaker::default();
+    for _ in 1..IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT {
+        assert_eq!(breaker.record(&failed(IrSyncFailureClass::Transient)), None);
+    }
+    assert_eq!(breaker.record(&succeeded), None);
+    for _ in 1..IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT {
+        assert_eq!(breaker.record(&failed(IrSyncFailureClass::Job)), None);
+    }
+    assert_eq!(
+        breaker.record(&failed(IrSyncFailureClass::Job)),
+        Some(IrManualStop::ConsecutiveFailures {
+            consecutive: IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT
+        })
+    );
+
+    let mut breaker = IrFailureBreaker::default();
+    assert_eq!(
+        breaker.record(&failed(IrSyncFailureClass::Unauthorized)),
+        Some(IrManualStop::Unauthorized)
+    );
+    assert_eq!(
+        breaker.record(&failed(IrSyncFailureClass::RateLimited { retry_after_seconds: Some(30) })),
+        Some(IrManualStop::RateLimited { retry_after_seconds: Some(30) })
+    );
 }

@@ -429,14 +429,10 @@ impl NetworkDatabase {
         kind: IrJobKind,
         now: i64,
         limit: u32,
-        ignore_retry_backoff: bool,
+        retry: IrJobRetryFilter,
     ) -> Result<Vec<IrScoreJobRecord>> {
         const SENDING_STALE_AFTER_SECONDS: i64 = 300;
-        let retry_filter = if ignore_retry_backoff {
-            "status IN ('pending', 'failed')"
-        } else {
-            "status IN ('pending', 'failed') AND next_attempt_at <= ?1"
-        };
+        let retry_filter = retry.sql_condition();
         let sql = format!(
             "SELECT id, provider, account_id, local_score_id, chart_sha256, ln_policy,
                 payload_json, status, attempt_count, next_attempt_at, last_error,
@@ -506,14 +502,10 @@ impl NetworkDatabase {
         kind: IrJobKind,
         now: i64,
         limit: u32,
-        ignore_retry_backoff: bool,
+        retry: IrJobRetryFilter,
     ) -> Result<Vec<IrScoreJobRecord>> {
         const SENDING_STALE_AFTER_SECONDS: i64 = 300;
-        let retry_filter = if ignore_retry_backoff {
-            "status IN ('pending', 'failed')"
-        } else {
-            "status IN ('pending', 'failed') AND next_attempt_at <= ?1"
-        };
+        let retry_filter = retry.sql_condition();
         let sql = format!(
             "SELECT id, provider, account_id, local_score_id, chart_sha256, ln_policy,
                 payload_json, status, attempt_count, next_attempt_at, last_error,
@@ -659,6 +651,45 @@ impl NetworkDatabase {
             |row| row.get(0),
         )?;
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    /// 未完了jobを、今claimできるもの・lease中・再試行待ちに分けて数える。
+    ///
+    /// claimできる条件は `claim_pending_ir_score_jobs_for_kind` と同じ。
+    pub fn ir_score_job_backlog_for_kind(
+        &self,
+        provider: &str,
+        account_id: &str,
+        kind: IrJobKind,
+        now: i64,
+        retry: IrJobRetryFilter,
+    ) -> Result<IrScoreJobBacklog> {
+        let retry_filter = retry.sql_condition();
+        let sql = format!(
+            "SELECT
+                COALESCE(SUM(CASE WHEN ({retry_filter})
+                                    OR (status = 'sending' AND updated_at <= ?1 - ?2)
+                             THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'sending' AND updated_at > ?1 - ?2
+                             THEN 1 ELSE 0 END), 0),
+                COUNT(*)
+             FROM ir_score_jobs
+             WHERE provider = ?3
+               AND account_id = ?4
+               AND kind = ?5
+               AND status != 'succeeded'"
+        );
+        let (claimable, leased, total): (i64, i64, i64) = self.conn.query_row(
+            &sql,
+            params![now, IR_JOB_SENDING_STALE_AFTER_SECONDS, provider, account_id, kind.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let count = |value: i64| u32::try_from(value.max(0)).unwrap_or(u32::MAX);
+        Ok(IrScoreJobBacklog {
+            claimable: count(claimable),
+            leased: count(leased),
+            deferred: count(total - claimable - leased),
+        })
     }
 
     pub fn unfinished_ir_score_local_ids(

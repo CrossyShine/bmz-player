@@ -8,7 +8,7 @@ pub(super) async fn sync_pending_ir_jobs_with_filter(
     ir_config: &IrConfig,
     now: i64,
     limit: u32,
-    ignore_retry_backoff: bool,
+    retry: IrJobRetryFilter,
     throttle: IrSyncThrottle,
     filter: Option<IrSyncJobFilter<'_>>,
 ) -> Result<IrSyncReport> {
@@ -25,7 +25,7 @@ pub(super) async fn sync_pending_ir_jobs_with_filter(
             kind,
             local_score_id,
             now,
-            ignore_retry_backoff,
+            retry != IrJobRetryFilter::RespectBackoff,
         )?,
         Some(IrSyncJobFilter { provider_key, account_id, kind, local_score_id: None }) => {
             network_db.claim_pending_ir_score_jobs_for_kind(
@@ -34,10 +34,14 @@ pub(super) async fn sync_pending_ir_jobs_with_filter(
                 kind,
                 now,
                 limit,
-                ignore_retry_backoff,
+                retry,
             )?
         }
-        None => network_db.claim_pending_ir_score_jobs(now, limit, ignore_retry_backoff)?,
+        None => network_db.claim_pending_ir_score_jobs(
+            now,
+            limit,
+            retry != IrJobRetryFilter::RespectBackoff,
+        )?,
     };
     let job_count = jobs.len();
     let replay_paths = match replay_paths_for_jobs(score_db_path, &jobs) {
@@ -60,10 +64,11 @@ pub(super) async fn sync_pending_ir_jobs_with_filter(
                 "provider is not configured",
                 None,
             )?;
-            report.failed += 1;
-            report
-                .messages
-                .push(format!("job {}: provider '{}' not configured", job.id, job.provider));
+            report.record_failure(
+                job.id,
+                IrSyncFailureClass::Unauthorized,
+                format!("job {}: provider '{}' not configured", job.id, job.provider),
+            );
             continue;
         };
         // Keep the checked token for this job: loading it again during submission
@@ -74,8 +79,11 @@ pub(super) async fn sync_pending_ir_jobs_with_filter(
                 Err(error) => {
                     let message = format!("{error:#}");
                     network_db.mark_ir_score_job_failed(job.id, job_now, &message, None)?;
-                    report.failed += 1;
-                    report.messages.push(format!("job {}: {message}", job.id));
+                    report.record_failure(
+                        job.id,
+                        IrSyncFailureClass::Unauthorized,
+                        format!("job {}: {message}", job.id),
+                    );
                     continue;
                 }
             };

@@ -107,8 +107,17 @@ SHA-256 fallback でラベルを付与する。
   の正規メタデータは上書きしない。`--sync` で既存の未完了score jobがある場合は、
   queueを増やさず先に最大100件を同期する。投入 batch の既定値は200件。
   `--all` は `--sync` を含む完走モードで、既存queueの排出と次の投入batchを候補が
-  なくなるまで繰り返す。送信失敗または他プロセスの `sending` job で進捗できない場合は
-  非ゼロで終了し、retry/backoff または5分のlease後に再実行する。
+  なくなるまで繰り返す。1回の実行で各jobは最大1回だけ送る。実行開始前から残る `failed` job は
+  retry/backoffを無視して1回再送し、実行中に失敗したjobは取り直さない。送信に失敗したjobは
+  queueに残したまま次のjobへ進み、全件を処理した後に失敗件数を報告して非ゼロで終了する。
+  失敗jobは常駐workerのbackoffに従う再試行、送信キューからの再送、次回の `--all` で再び送られる。
+  次の場合は途中で打ち切って非ゼロで終了する。
+  - 401/403・未ログイン・provider設定の不備: 以降のjobも失敗するため即座に止める。
+  - 429: サーバーの送信制限に従い即座に止める。
+  - それ以外の失敗（4xxの内容エラー、5xx、通信エラー）が10件続いた場合
+    （`IR_MANUAL_CONSECUTIVE_FAILURE_LIMIT`）。サーバー障害中に全jobのbackoffを
+    伸ばさないためで、成功が1件あれば数え直す。
+  他プロセスの `sending` job だけが残って進捗できない場合も非ゼロで終了し、5分のlease後に再実行する。
   `--resend` は失敗済みjob・成功snapshotを同じidempotency keyとrequest payloadで再queueする。
   既存pending jobと有効なsending leaseは変更せず、`enqueued` は実際に再queueした件数を示す。
   `--all --resend` は1回の実行内で各履歴を最大1回だけ処理する。`--dry-run --resend` は
@@ -148,6 +157,9 @@ SHA-256 fallback でラベルを付与する。
     `include_replay` と `include_course_stages` は CLI 既定値（どちらも false）。
     確認モーダルを開くと、dry-run 相当で候補件数を数え（送信待ちの既存 job も加える）、
     `件数 × IR_CLI_SYNC_JOB_SPACING_MS` を最短時間の目安として表示する。
+    失敗jobの扱いと打ち切り条件は `--all` と同じ。lease待ちから再開しても同じ実行開始時刻を使い、
+    その実行で失敗したjobは再送しない。失敗が残った完了・連続失敗・認証エラー・送信制限は
+    それぞれ別のトーストで通知する。
   - 「IRからスコアを取得」は `ir download-scores` 相当で、CLI の既定上限（200 件）を付けず全件を対象にする。
     既に取り込んだ score は除外されるため、中断後の再実行は続きから進む。GUIでは新規scoreが
     保存された場合、完了・中断・エラーの通知時にSelect一覧、フォルダsummary、player statsを更新する。

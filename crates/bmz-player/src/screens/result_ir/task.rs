@@ -162,7 +162,7 @@ pub(super) fn spawn_result_ir_task_for_target(
                 },
                 now,
                 1,
-                false,
+                crate::storage::network_db::IrJobRetryFilter::RespectBackoff,
                 IrSyncThrottle::none(),
             )
             .await
@@ -380,7 +380,7 @@ async fn sync_current_secondary_submissions(
             },
             now_unix_seconds(),
             1,
-            false,
+            crate::storage::network_db::IrJobRetryFilter::RespectBackoff,
             IrSyncThrottle::none(),
         )
         .await

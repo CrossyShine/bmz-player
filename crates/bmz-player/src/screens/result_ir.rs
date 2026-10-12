@@ -827,6 +827,7 @@ mod tests {
             submitted: 1,
             failed: 0,
             messages: Vec::new(),
+            failures: Vec::new(),
             included_rankings: vec![
                 IrIncludedRanking {
                     provider: "bmz-official".to_string(),
