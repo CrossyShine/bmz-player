@@ -109,6 +109,8 @@ SHA-256 fallback でラベルを付与する。
   course stage / autoplay は既定で除外。local backfill は未登録 chart を作成できるが、既存 chart
   の正規メタデータは上書きしない。`--sync` で既存の未完了score jobがある場合は、
   queueを増やさず先に最大100件を同期する。投入 batch の既定値は200件。
+  `--sync` の同期で送信に失敗したjobが残った場合や、他プロセスの `sending` jobだけが残って
+  進捗できない場合は、`--all` と同じく非ゼロで終了する（失敗jobはqueueに残る）。
   `--all` は `--sync` を含む完走モードで、既存queueの排出と次の投入batchを候補が
   なくなるまで繰り返す。履歴は `(played_at, id)` 順に512行ずつ読み、次の投入batchは
   前のbatchが止まった行の次から読む（同じ実行内で全履歴を読み直さない）。

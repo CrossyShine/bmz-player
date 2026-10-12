@@ -33,37 +33,40 @@ pub(super) async fn upload_local(
     };
     let (_keep_alive, cancel) = no_cancel();
     let mut sink = |event| print_progress(&event);
-    if !all {
-        let report =
-            upload_local_batch(&ctx, &options, sync_after_enqueue, &mut sink, &cancel).await?;
-        ensure_no_skipped_scores(&report)?;
-        return Ok(());
-    }
-
-    let report = upload_local_all(&ctx, &options, now_unix_seconds(), &mut sink, &cancel).await?;
+    let report = if all {
+        upload_local_all(&ctx, &options, now_unix_seconds(), &mut sink, &cancel).await?
+    } else {
+        upload_local_batch(&ctx, &options, sync_after_enqueue, &mut sink, &cancel).await?
+    };
     ensure_no_skipped_scores(&report)?;
+    ensure_upload_stop_success(&report, all)
+}
+
+/// 送信失敗・打ち切り・lease待ちで終わった場合は非ゼロ終了にする。`--all` の有無で共通。
+fn ensure_upload_stop_success(report: &IrManualUploadReport, all: bool) -> Result<()> {
+    let operation = if all { "full local upload" } else { "local upload sync" };
     match report.stop {
         IrManualStop::FailedJobs { failed } => bail!(
-            "full local upload finished with {} submissions and {failed} failed job(s); failed jobs stay queued for retry",
+            "{operation} finished with {} submissions and {failed} failed job(s); failed jobs stay queued for retry",
             report.submitted
         ),
         IrManualStop::ConsecutiveFailures { consecutive } => bail!(
-            "full local upload stopped after {consecutive} consecutive failures ({} submitted); check the IR server and network, then rerun",
+            "{operation} stopped after {consecutive} consecutive failures ({} submitted); check the IR server and network, then rerun",
             report.submitted
         ),
         IrManualStop::Unauthorized => bail!(
-            "full local upload stopped because the IR account is not authorized ({} submitted); run `bmz ir login` and rerun",
+            "{operation} stopped because the IR account is not authorized ({} submitted); run `bmz ir login` and rerun",
             report.submitted
         ),
         IrManualStop::RateLimited { retry_after_seconds } => bail!(
-            "full local upload stopped because the IR server is rate limiting submissions ({} submitted); rerun{}",
+            "{operation} stopped because the IR server is rate limiting submissions ({} submitted); rerun{}",
             report.submitted,
             retry_after_seconds
                 .map(|seconds| format!(" after {seconds} seconds"))
                 .unwrap_or_else(|| " later".to_string())
         ),
         IrManualStop::WaitingForSendingJob => bail!(
-            "full local upload is waiting for an existing sending job; rerun after its 5-minute lease expires"
+            "{operation} is waiting for an existing sending job; rerun after its 5-minute lease expires"
         ),
         IrManualStop::Completed | IrManualStop::Cancelled => Ok(()),
     }
@@ -84,4 +87,26 @@ fn ensure_no_skipped_scores(report: &IrManualUploadReport) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_sync_failures_and_waits_exit_non_zero_like_full_upload() {
+        for all in [false, true] {
+            let report = |stop| IrManualUploadReport { stop, ..IrManualUploadReport::default() };
+            assert!(ensure_upload_stop_success(&report(IrManualStop::Completed), all).is_ok());
+            assert!(ensure_upload_stop_success(&report(IrManualStop::Cancelled), all).is_ok());
+            let failed =
+                ensure_upload_stop_success(&report(IrManualStop::FailedJobs { failed: 2 }), all)
+                    .unwrap_err();
+            assert!(failed.to_string().contains("2 failed job(s)"));
+            assert!(
+                ensure_upload_stop_success(&report(IrManualStop::WaitingForSendingJob), all)
+                    .is_err()
+            );
+        }
+    }
 }
