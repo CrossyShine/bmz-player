@@ -293,6 +293,8 @@ export interface IrOwnScoreHistoryResult {
 
 export interface IrOwnScoreHistoryEntry {
   score_id: string
+  /** 投稿時のidempotency key。クライアントが自分の投稿をローカル履歴へ紐付けるために返す。 */
+  idempotency_key: string
   chart_sha256: string
   clear: string
   ex_score: number

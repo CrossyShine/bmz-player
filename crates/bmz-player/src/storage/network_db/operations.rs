@@ -1078,6 +1078,48 @@ impl NetworkDatabase {
             .map_err(Into::into)
     }
 
+    /// 投稿時のidempotency keyから、そのscoreを送ったローカル履歴を引く。
+    ///
+    /// 成功台帳を優先し、応答を受け取れず台帳に無い送信（失敗・送信中のjob）も
+    /// job本体の `submission_key` から辿る。
+    pub fn local_score_id_for_submission_key(
+        &self,
+        provider: &str,
+        account_id: &str,
+        submission_key: &str,
+    ) -> Result<Option<i64>> {
+        if submission_key.is_empty() {
+            return Ok(None);
+        }
+        let ledger = self
+            .conn
+            .query_row(
+                "SELECT local_score_id FROM ir_score_success_ledger
+                 WHERE provider = ?1 AND account_id = ?2 AND kind = 'score'
+                   AND submission_key = ?3
+                 ORDER BY submitted_at DESC
+                 LIMIT 1",
+                params![provider, account_id, submission_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if ledger.is_some() {
+            return Ok(ledger);
+        }
+        self.conn
+            .query_row(
+                "SELECT local_score_id FROM ir_score_jobs
+                 WHERE provider = ?1 AND account_id = ?2 AND kind = 'score'
+                   AND submission_key = ?3
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT 1",
+                params![provider, account_id, submission_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn has_successful_ir_score_submission(
         &self,
         provider: &str,

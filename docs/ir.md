@@ -144,6 +144,13 @@ SHA-256 fallback でラベルを付与する。
   これは廃止済みのevidence形式でqueueに残ったjobを回復するためで、初回送信の署名・
   データ検証も行う。
   per-history ghost は現在の `score_history` には保持していないため送らない。
+- download scores: 自分の送信したscoreは新規履歴として取り込まず、既存のローカル履歴へ
+  `bmz_ir` sourceを紐付ける。照合は成功台帳のremote score IDを優先し、引けない場合は
+  `GET /api/v1/me/scores` が返す投稿時の `idempotency_key` を、成功台帳・未完了jobの
+  `submission_key`、local backfillの `score_history_ir_identity` の順に照合する。応答を失った送信、
+  score IDの無い応答、送信中のjob、台帳追加前にpruningされた履歴も重複取り込みしない。
+  keyで引いた履歴は譜面hashが一致する場合だけ紐付ける。keyを返さないproviderでは従来どおり
+  remote score IDだけで照合する。
 - download scores: `bmz ir download-scores` は各行の取り込み失敗数を集計してから出力し、
   1件以上あれば通常実行・dry-runとも非ゼロで終了する。通常実行ではほかの有効な行を保存し、
   再実行時に重複登録しない。dry-runでは保存しない。

@@ -64,6 +64,7 @@ export default defineEventHandler(async (event): Promise<IrOwnScoreHistoryResult
     db
       .select({
         score_id: schema.scores.id,
+        idempotency_key: schema.scores.idempotencyKey,
         chart_sha256: schema.scores.chartSha256,
         clear: schema.scores.clearType,
         ex_score: schema.scores.exScore,

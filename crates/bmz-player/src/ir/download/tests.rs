@@ -21,6 +21,7 @@ fn open_network_db() -> NetworkDatabase {
 fn score_entry(id: &str) -> IrOwnScoreHistoryEntry {
     IrOwnScoreHistoryEntry {
         score_id: id.to_string(),
+        idempotency_key: None,
         chart_sha256: "11".repeat(32),
         clear: "Hard".to_string(),
         ex_score: 21,
@@ -462,4 +463,110 @@ fn dry_run_reports_invalid_scores_without_counting_them_as_candidates() {
         .query_row("SELECT COUNT(*) FROM score_history", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+fn keyed_entry(id: &str, key: &str) -> IrOwnScoreHistoryEntry {
+    IrOwnScoreHistoryEntry { idempotency_key: Some(key.to_string()), ..score_entry(id) }
+}
+
+fn history_count(score_db: &ScoreDatabase) -> i64 {
+    score_db.conn().query_row("SELECT COUNT(*) FROM score_history", [], |row| row.get(0)).unwrap()
+}
+
+fn import_one(
+    score_db: &mut ScoreDatabase,
+    network_db: &NetworkDatabase,
+    entry: IrOwnScoreHistoryEntry,
+) -> IrScoreDownloadReport {
+    let mut report = IrScoreDownloadReport::default();
+    import_ir_score_entries(
+        score_db,
+        network_db,
+        "provider-1",
+        "account-1",
+        &[entry],
+        false,
+        1_800_000_000,
+        &mut report,
+    )
+    .unwrap();
+    report
+}
+
+#[test]
+fn score_sent_without_a_recorded_response_links_by_submission_key() {
+    // 送信は届いたが応答を失いjobはfailedのまま（成功台帳にremote IDが無い）。
+    let mut score_db = open_score_db();
+    let mut network_db = open_network_db();
+    let local_history_id =
+        score_db.insert_score(&score_record_from_ir_entry(&score_entry("local")).unwrap()).unwrap();
+    let job_id = network_db
+        .enqueue_ir_score_job(&NewIrScoreJob {
+            provider: "provider-1".to_string(),
+            account_id: "account-1".to_string(),
+            kind: IrJobKind::Score,
+            local_score_id: local_history_id,
+            chart_sha256: [0x11; 32],
+            ln_policy: LnScorePolicy::ForceLn,
+            payload_json: r#"{"idempotency_key":"play-key-1"}"#.to_string(),
+            now: 1,
+        })
+        .unwrap();
+    network_db.mark_ir_score_job_failed(job_id, 2, "response lost", None).unwrap();
+
+    let report = import_one(&mut score_db, &network_db, keyed_entry("remote-1", "play-key-1"));
+
+    assert_eq!((report.imported, report.linked_existing), (0, 1));
+    assert_eq!(history_count(&score_db), 1);
+    let linked = score_db
+        .score_history_id_for_source(&ScoreHistorySourceKey {
+            source: IR_SCORE_DOWNLOAD_SOURCE.to_string(),
+            provider: "provider-1".to_string(),
+            account_id: "account-1".to_string(),
+            remote_score_id: "remote-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(linked, Some(local_history_id));
+}
+
+#[test]
+fn backfilled_score_links_by_history_identity_without_network_records() {
+    // network.dbを失った後でも、local backfillが送ったkeyは履歴のidentityに残る。
+    let mut score_db = open_score_db();
+    let network_db = open_network_db();
+    let local_history_id =
+        score_db.insert_score(&score_record_from_ir_entry(&score_entry("local")).unwrap()).unwrap();
+    let key = score_db.ir_submission_idempotency_key_for_history(local_history_id).unwrap();
+
+    let report = import_one(&mut score_db, &network_db, keyed_entry("remote-1", &key));
+
+    assert_eq!((report.imported, report.linked_existing), (0, 1));
+    assert_eq!(history_count(&score_db), 1);
+}
+
+#[test]
+fn submission_key_for_a_different_chart_is_not_linked() {
+    let mut score_db = open_score_db();
+    let network_db = open_network_db();
+    let local_history_id =
+        score_db.insert_score(&score_record_from_ir_entry(&score_entry("local")).unwrap()).unwrap();
+    let key = score_db.ir_submission_idempotency_key_for_history(local_history_id).unwrap();
+    let entry =
+        IrOwnScoreHistoryEntry { chart_sha256: "22".repeat(32), ..keyed_entry("remote-1", &key) };
+
+    let report = import_one(&mut score_db, &network_db, entry);
+
+    assert_eq!((report.imported, report.linked_existing), (1, 0));
+    assert_eq!(history_count(&score_db), 2);
+}
+
+#[test]
+fn own_score_history_entry_reads_optional_idempotency_key() {
+    let mut value = serde_json::to_value(score_entry("remote-1")).unwrap();
+    value.as_object_mut().unwrap().remove("idempotency_key");
+    let without: IrOwnScoreHistoryEntry = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(without.idempotency_key, None);
+    value["idempotency_key"] = serde_json::json!("key-1");
+    let with: IrOwnScoreHistoryEntry = serde_json::from_value(value).unwrap();
+    assert_eq!(with.idempotency_key.as_deref(), Some("key-1"));
 }

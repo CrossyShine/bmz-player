@@ -15,6 +15,22 @@ impl ScoreDatabase {
             .map_err(Into::into)
     }
 
+    /// local backfillで送ったidempotency keyから、送信元の履歴IDを引く。
+    pub fn score_history_id_for_ir_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT score_history_id FROM score_history_ir_identity
+                 WHERE idempotency_key = ?1",
+                params![idempotency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn open_read_only(path: &Path) -> Result<Self> {
         Ok(Self {
             conn: Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?,

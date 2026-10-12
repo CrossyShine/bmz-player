@@ -259,8 +259,7 @@ fn import_ir_score_entry(
     }
 
     if let Some(local_score_id) =
-        network_db.local_score_id_for_remote_score(provider_key, account_id, &entry.score_id)?
-        && score_history_exists(score_db, local_score_id)?
+        uploaded_local_score_id(score_db, network_db, provider_key, account_id, entry)?
     {
         let linked = dry_run || score_db.attach_score_history_source(local_score_id, &source)?;
         if linked {
@@ -456,6 +455,55 @@ fn source_record(
         server_received_at: entry.server_received_at,
         imported_at: now,
     }
+}
+
+/// IR上のscoreが、このクライアントから送ったローカル履歴のものなら、その履歴IDを返す。
+///
+/// remote score IDの成功台帳で引けない送信（応答を失った送信、score IDの無い応答、
+/// 台帳追加前にpruningされた履歴、送信中のjob）も、投稿時のidempotency keyで照合する。
+/// keyで引いた履歴は譜面が一致する場合だけ採用する。
+fn uploaded_local_score_id(
+    score_db: &ScoreDatabase,
+    network_db: &NetworkDatabase,
+    provider_key: &str,
+    account_id: &str,
+    entry: &IrOwnScoreHistoryEntry,
+) -> Result<Option<i64>> {
+    if let Some(local_score_id) =
+        network_db.local_score_id_for_remote_score(provider_key, account_id, &entry.score_id)?
+        && score_history_exists(score_db, local_score_id)?
+    {
+        return Ok(Some(local_score_id));
+    }
+    let Some(key) = entry.idempotency_key.as_deref().filter(|key| !key.is_empty()) else {
+        return Ok(None);
+    };
+    let candidates = [
+        network_db.local_score_id_for_submission_key(provider_key, account_id, key)?,
+        score_db.score_history_id_for_ir_idempotency_key(key)?,
+    ];
+    for local_score_id in candidates.into_iter().flatten() {
+        if score_history_chart_matches(score_db, local_score_id, &entry.chart_sha256)? {
+            return Ok(Some(local_score_id));
+        }
+    }
+    Ok(None)
+}
+
+fn score_history_chart_matches(
+    score_db: &ScoreDatabase,
+    score_history_id: i64,
+    chart_sha256: &str,
+) -> Result<bool> {
+    let stored: Option<String> = score_db
+        .conn()
+        .query_row(
+            "SELECT chart_sha256 FROM score_history WHERE id = ?1",
+            params![score_history_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored.is_some_and(|stored| stored.eq_ignore_ascii_case(chart_sha256)))
 }
 
 fn score_history_exists(score_db: &ScoreDatabase, score_history_id: i64) -> Result<bool> {
