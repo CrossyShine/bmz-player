@@ -19,6 +19,11 @@ impl WinitApp {
             self.jobs.ir_manual.dispatch(self.ir_manual_env(), queued);
         }
         if let Some(outcome) = self.jobs.ir_manual.take_notice() {
+            if outcome.imported_scores_need_refresh() {
+                self.refresh_player_stats_snapshot();
+                self.invalidate_select_folder_summaries();
+                self.reload_select_items();
+            }
             let message =
                 outcome_message(Localizer::new(self.boot.profile_config.ui.locale()), &outcome);
             tracing::info!(op = ?outcome.op, status = ?outcome.status, "manual IR operation finished");

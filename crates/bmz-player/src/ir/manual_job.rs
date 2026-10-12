@@ -150,6 +150,14 @@ pub struct IrManualOutcome {
     pub messages: Vec<String>,
 }
 
+impl IrManualOutcome {
+    /// Download が新しいscoreを保存した場合、Selectとplayer statsの読込更新が必要。
+    /// 完了・中断・エラーのどれでも、保存済み件数を進捗が保持していれば更新する。
+    pub fn imported_scores_need_refresh(&self) -> bool {
+        self.op == IrManualOp::DownloadScores && self.progress.download_imported > 0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IrManualRunning {
     pub op: IrManualOp,

@@ -80,6 +80,108 @@ fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
 }
 
 #[test]
+fn downloaded_imports_refresh_select_for_completed_cancelled_and_error_notices() {
+    for status in [
+        IrManualOutcomeStatus::Completed,
+        IrManualOutcomeStatus::Cancelled,
+        IrManualOutcomeStatus::Error("later page failed".into()),
+    ] {
+        let handle = IrManualHandle::new();
+        {
+            let mut state = handle.lock();
+            state.running = Some((
+                1,
+                IrManualRunning {
+                    op: IrManualOp::DownloadScores,
+                    progress: IrManualProgressView::default(),
+                },
+            ));
+        }
+        apply_progress(
+            &handle,
+            1,
+            IrManualProgress::DownloadPage(crate::ir::download::IrScoreDownloadReport {
+                pages: 1,
+                scanned: 3,
+                imported: 2,
+                linked_existing: 1,
+                ..Default::default()
+            }),
+        );
+        let progress = handle.snapshot().running.unwrap().progress;
+        RunGuard { handle: handle.clone(), generation: 1 }.finish(IrManualOutcome {
+            op: IrManualOp::DownloadScores,
+            status,
+            progress,
+            messages: Vec::new(),
+        });
+
+        let notice = handle.take_notice().unwrap();
+        assert!(notice.imported_scores_need_refresh());
+        assert!(handle.take_notice().is_none(), "a notice must be consumed only once");
+    }
+
+    let handle = IrManualHandle::new();
+    {
+        let mut state = handle.lock();
+        state.running = Some((
+            1,
+            IrManualRunning {
+                op: IrManualOp::DownloadScores,
+                progress: IrManualProgressView::default(),
+            },
+        ));
+    }
+    apply_progress(
+        &handle,
+        1,
+        IrManualProgress::DownloadPage(crate::ir::download::IrScoreDownloadReport {
+            pages: 1,
+            scanned: 2,
+            linked_existing: 2,
+            ..Default::default()
+        }),
+    );
+    let progress = handle.snapshot().running.unwrap().progress;
+    RunGuard { handle: handle.clone(), generation: 1 }.finish(IrManualOutcome {
+        op: IrManualOp::DownloadScores,
+        status: IrManualOutcomeStatus::Completed,
+        progress,
+        messages: Vec::new(),
+    });
+    assert!(!handle.take_notice().unwrap().imported_scores_need_refresh());
+
+    let handle = IrManualHandle::new();
+    {
+        let mut state = handle.lock();
+        state.running = Some((
+            1,
+            IrManualRunning {
+                op: IrManualOp::DownloadScores,
+                progress: IrManualProgressView::default(),
+            },
+        ));
+    }
+    apply_progress(
+        &handle,
+        1,
+        IrManualProgress::DownloadPage(crate::ir::download::IrScoreDownloadReport {
+            imported: 2,
+            ..Default::default()
+        }),
+    );
+    let stale_outcome = IrManualOutcome {
+        op: IrManualOp::DownloadScores,
+        status: IrManualOutcomeStatus::Completed,
+        progress: handle.snapshot().running.unwrap().progress,
+        messages: Vec::new(),
+    };
+    handle.reset_for_profile();
+    RunGuard { handle: handle.clone(), generation: 1 }.finish(stale_outcome);
+    assert!(handle.take_notice().is_none(), "a superseded profile must discard its notice");
+}
+
+#[test]
 fn run_pauses_the_resident_worker_and_publishes_the_outcome() {
     let fixture = Fixture::new("run");
     fixture.add_failed_jobs(3);
