@@ -95,6 +95,18 @@ pub fn resolve_local_upload_target(
     Ok((target.provider_key, target.account_id))
 }
 
+/// 走査を一度に読む `score_history` の行数。全履歴をメモリへ載せない。
+const SCORE_HISTORY_SCAN_PAGE_SIZE: u32 = 512;
+
+/// 同じ実行で投入batchを繰り返すときの走査状態。
+#[derive(Debug, Default)]
+pub(crate) struct IrLocalUploadScan {
+    /// resendで処理済み、または読み取りに失敗した履歴。
+    pub(crate) processed: HashSet<i64>,
+    /// 最後に走査した履歴の `(played_at, id)`。次のbatchはこの後から読む。
+    resume_after: Option<(i64, i64)>,
+}
+
 pub fn enqueue_local_score_jobs(
     profile_root: &Path,
     ir_config: &IrConfig,
@@ -104,7 +116,7 @@ pub fn enqueue_local_score_jobs(
     options: &IrLocalUploadOptions,
     now: i64,
 ) -> Result<IrLocalUploadReport> {
-    enqueue_local_score_jobs_with_processed(
+    enqueue_local_score_jobs_with_scan(
         profile_root,
         ir_config,
         score_db,
@@ -112,11 +124,15 @@ pub fn enqueue_local_score_jobs(
         network_db,
         options,
         now,
-        &mut HashSet::new(),
+        &mut IrLocalUploadScan::default(),
     )
 }
 
-pub(crate) fn enqueue_local_score_jobs_with_processed(
+/// `scan` の続きから履歴を走査して投入する。
+///
+/// 走査は `(played_at, id)` 順で、batch上限に達した行の次から再開する。上限に達するまでの
+/// 候補は全て投入済みなので、同じ実行内で前の行を読み直す必要はない。
+pub(crate) fn enqueue_local_score_jobs_with_scan(
     profile_root: &Path,
     ir_config: &IrConfig,
     score_db: &ScoreDatabase,
@@ -124,174 +140,186 @@ pub(crate) fn enqueue_local_score_jobs_with_processed(
     network_db: &mut NetworkDatabase,
     options: &IrLocalUploadOptions,
     now: i64,
-    processed: &mut HashSet<i64>,
+    scan: &mut IrLocalUploadScan,
 ) -> Result<IrLocalUploadReport> {
     let target = resolve_target_provider(ir_config, options.provider.as_deref())?;
     let limit = options.limit.max(1);
-    let rows = load_score_history_rows(score_db)?;
     let mut report = IrLocalUploadReport {
         provider_key: target.provider_key.clone(),
         account_id: target.account_id.clone(),
         ..IrLocalUploadReport::default()
     };
+    let processed = &mut scan.processed;
 
-    for row in rows {
-        report.scanned += 1;
-        // resendでは処理済みの履歴、全モードで読み取りに失敗した履歴を同じ実行内で再走査しない。
-        let row = match row {
-            Ok(row) if processed.contains(&row.id) => continue,
-            Ok(row) => row,
-            Err(invalid) => {
-                if processed.insert(invalid.id) {
-                    report.record_invalid(invalid.id, &invalid.error);
-                }
-                continue;
-            }
-        };
-
-        if !options.include_course_stages && row.course_score_id.is_some() {
-            report.skipped_course_stage += 1;
-            continue;
+    'scan: loop {
+        let page =
+            load_score_history_page(score_db, scan.resume_after, SCORE_HISTORY_SCAN_PAGE_SIZE)?;
+        if page.is_empty() {
+            break;
         }
-        if row.autoplay {
-            report.skipped_autoplay += 1;
-            continue;
-        }
-        if has_score_from_target_ir_source(score_db, &target, row.id)? {
-            report.skipped_already_submitted += 1;
-            continue;
-        }
-        if options.resend {
-            match network_db.enqueue_backfill_score_resend(
-                &target.provider_key,
-                &target.account_id,
-                row.id,
-                now,
-                None,
-                options.dry_run,
-            )? {
-                IrBackfillResendOutcome::Enqueued if options.dry_run => {
-                    report.candidates += 1;
-                    continue;
-                }
-                IrBackfillResendOutcome::Enqueued => {
-                    processed.insert(row.id);
-                    report.candidates += 1;
-                    report.enqueued += 1;
-                    if report.enqueued >= limit {
-                        report.limit_reached = true;
-                        break;
+        for (key, row) in page {
+            let previous_key = scan.resume_after.replace(key);
+            report.scanned += 1;
+            // resendでは処理済みの履歴、全モードで読み取りに失敗した履歴を同じ実行内で再走査しない。
+            let row = match row {
+                Ok(row) if processed.contains(&row.id) => continue,
+                Ok(row) => row,
+                Err(invalid) => {
+                    if processed.insert(invalid.id) {
+                        report.record_invalid(invalid.id, &invalid.error);
                     }
                     continue;
                 }
-                IrBackfillResendOutcome::AlreadyPending => {
-                    processed.insert(row.id);
-                    report.skipped_already_queued += 1;
-                    continue;
-                }
-                IrBackfillResendOutcome::Busy => {
-                    processed.insert(row.id);
-                    report.skipped_busy += 1;
-                    continue;
-                }
-                IrBackfillResendOutcome::PayloadUnavailable => {
-                    processed.insert(row.id);
-                    report.skipped_resend_payload_unavailable += 1;
-                    continue;
-                }
-                IrBackfillResendOutcome::NeedsPayload => {}
-            }
-        }
-        if !options.resend {
-            match existing_score_state(network_db, &target, row.id).with_context(|| {
-                format!("failed to check IR submission state for score {}", row.id)
-            })? {
-                ExistingScoreState::Submitted => {
-                    report.skipped_already_submitted += 1;
-                    continue;
-                }
-                ExistingScoreState::Queued => {
-                    report.skipped_already_queued += 1;
-                    continue;
-                }
-                ExistingScoreState::None => {}
-            }
-        }
+            };
 
-        let prepared = match prepare_submission_inputs(profile_root, library_db, &row, options) {
-            Ok(Some(prepared)) => prepared,
-            Ok(None) => {
-                report.skipped_missing_chart += 1;
+            if !options.include_course_stages && row.course_score_id.is_some() {
+                report.skipped_course_stage += 1;
                 continue;
             }
-            Err(error) => {
-                processed.insert(row.id);
-                report.record_invalid(row.id, &error);
+            if row.autoplay {
+                report.skipped_autoplay += 1;
                 continue;
             }
-        };
-        let PreparedSubmissionInputs { chart, analysis, replay_hash } = prepared;
-        if options.include_replay
-            && row.replay_path.as_deref().is_some_and(|path| !path.is_empty())
-            && replay_hash.is_none()
-        {
-            report.missing_replays += 1;
-        }
+            if has_score_from_target_ir_source(score_db, &target, row.id)? {
+                report.skipped_already_submitted += 1;
+                continue;
+            }
+            if options.resend {
+                match network_db.enqueue_backfill_score_resend(
+                    &target.provider_key,
+                    &target.account_id,
+                    row.id,
+                    now,
+                    None,
+                    options.dry_run,
+                )? {
+                    IrBackfillResendOutcome::Enqueued if options.dry_run => {
+                        report.candidates += 1;
+                        continue;
+                    }
+                    IrBackfillResendOutcome::Enqueued => {
+                        processed.insert(row.id);
+                        report.candidates += 1;
+                        report.enqueued += 1;
+                        if report.enqueued >= limit {
+                            report.limit_reached = true;
+                            break 'scan;
+                        }
+                        continue;
+                    }
+                    IrBackfillResendOutcome::AlreadyPending => {
+                        processed.insert(row.id);
+                        report.skipped_already_queued += 1;
+                        continue;
+                    }
+                    IrBackfillResendOutcome::Busy => {
+                        processed.insert(row.id);
+                        report.skipped_busy += 1;
+                        continue;
+                    }
+                    IrBackfillResendOutcome::PayloadUnavailable => {
+                        processed.insert(row.id);
+                        report.skipped_resend_payload_unavailable += 1;
+                        continue;
+                    }
+                    IrBackfillResendOutcome::NeedsPayload => {}
+                }
+            }
+            if !options.resend {
+                match existing_score_state(network_db, &target, row.id).with_context(|| {
+                    format!("failed to check IR submission state for score {}", row.id)
+                })? {
+                    ExistingScoreState::Submitted => {
+                        report.skipped_already_submitted += 1;
+                        continue;
+                    }
+                    ExistingScoreState::Queued => {
+                        report.skipped_already_queued += 1;
+                        continue;
+                    }
+                    ExistingScoreState::None => {}
+                }
+            }
 
-        report.candidates += 1;
-        if options.dry_run {
-            continue;
-        }
-        if report.enqueued >= limit {
-            report.limit_reached = true;
-            break;
-        }
+            let prepared = match prepare_submission_inputs(profile_root, library_db, &row, options)
+            {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => {
+                    report.skipped_missing_chart += 1;
+                    continue;
+                }
+                Err(error) => {
+                    processed.insert(row.id);
+                    report.record_invalid(row.id, &error);
+                    continue;
+                }
+            };
+            let PreparedSubmissionInputs { chart, analysis, replay_hash } = prepared;
+            if options.include_replay
+                && row.replay_path.as_deref().is_some_and(|path| !path.is_empty())
+                && replay_hash.is_none()
+            {
+                report.missing_replays += 1;
+            }
 
-        let payload = build_local_score_submission(&row, &chart, analysis.as_ref(), replay_hash);
-        let new_job = NewIrScoreJob {
-            provider: target.provider_key.clone(),
-            account_id: target.account_id.clone(),
-            kind: IrJobKind::Score,
-            local_score_id: row.id,
-            chart_sha256: row.chart_sha256,
-            ln_policy: row.ln_policy,
-            payload_json: serde_json::to_string(&payload)?,
-            now,
-        };
-        if options.resend {
-            match network_db.enqueue_backfill_score_resend(
-                &target.provider_key,
-                &target.account_id,
-                row.id,
+            report.candidates += 1;
+            if options.dry_run {
+                continue;
+            }
+            if report.enqueued >= limit {
+                report.limit_reached = true;
+                // この行は投入していないので、次のbatchはこの行から読む。
+                scan.resume_after = previous_key;
+                break 'scan;
+            }
+
+            let payload =
+                build_local_score_submission(&row, &chart, analysis.as_ref(), replay_hash);
+            let new_job = NewIrScoreJob {
+                provider: target.provider_key.clone(),
+                account_id: target.account_id.clone(),
+                kind: IrJobKind::Score,
+                local_score_id: row.id,
+                chart_sha256: row.chart_sha256,
+                ln_policy: row.ln_policy,
+                payload_json: serde_json::to_string(&payload)?,
                 now,
-                Some(&new_job),
-                false,
-            )? {
-                IrBackfillResendOutcome::Enqueued => {
-                    report.enqueued += 1;
-                    processed.insert(row.id);
+            };
+            if options.resend {
+                match network_db.enqueue_backfill_score_resend(
+                    &target.provider_key,
+                    &target.account_id,
+                    row.id,
+                    now,
+                    Some(&new_job),
+                    false,
+                )? {
+                    IrBackfillResendOutcome::Enqueued => {
+                        report.enqueued += 1;
+                        processed.insert(row.id);
+                    }
+                    IrBackfillResendOutcome::AlreadyPending => {
+                        processed.insert(row.id);
+                        report.skipped_already_queued += 1;
+                    }
+                    IrBackfillResendOutcome::Busy => {
+                        processed.insert(row.id);
+                        report.skipped_busy += 1;
+                    }
+                    IrBackfillResendOutcome::PayloadUnavailable => {
+                        processed.insert(row.id);
+                        report.skipped_resend_payload_unavailable += 1;
+                    }
+                    IrBackfillResendOutcome::NeedsPayload => unreachable!("payload provided"),
                 }
-                IrBackfillResendOutcome::AlreadyPending => {
-                    processed.insert(row.id);
-                    report.skipped_already_queued += 1;
-                }
-                IrBackfillResendOutcome::Busy => {
-                    processed.insert(row.id);
-                    report.skipped_busy += 1;
-                }
-                IrBackfillResendOutcome::PayloadUnavailable => {
-                    processed.insert(row.id);
-                    report.skipped_resend_payload_unavailable += 1;
-                }
-                IrBackfillResendOutcome::NeedsPayload => unreachable!("payload provided"),
+            } else {
+                network_db.enqueue_ir_score_job(&new_job)?;
+                report.enqueued += 1;
             }
-        } else {
-            network_db.enqueue_ir_score_job(&new_job)?;
-            report.enqueued += 1;
-        }
-        if report.enqueued >= limit {
-            report.limit_reached = true;
-            break;
+            if report.enqueued >= limit {
+                report.limit_reached = true;
+                break 'scan;
+            }
         }
     }
 
@@ -316,6 +344,17 @@ fn prepare_submission_inputs(
     let Some(chart) = primary_chart_for_score(library_db, row.chart_sha256)? else {
         return Ok(None);
     };
+    if options.dry_run {
+        // 件数だけを数える。payload用の解析情報は読まず、replayはhashせず存在だけ確かめる。
+        let replay_present = options.include_replay
+            && replay_file_path(profile_root, row.replay_path.as_deref())
+                .is_some_and(|path| path.is_file());
+        return Ok(Some(PreparedSubmissionInputs {
+            chart,
+            analysis: None,
+            replay_hash: replay_present.then(String::new),
+        }));
+    }
     let analysis = library_db.chart_analysis_by_chart_id(chart.chart_id)?;
     let replay_hash = if options.include_replay {
         replay_hash(profile_root, row.replay_path.as_deref())?
@@ -503,9 +542,14 @@ struct InvalidScoreRow {
     error: anyhow::Error,
 }
 
-fn load_score_history_rows(
+type ScoreHistoryPage = Vec<((i64, i64), std::result::Result<BackfillScoreRow, InvalidScoreRow>)>;
+
+/// `(played_at, id)` が `after` より後の履歴を最大 `limit` 行、その順で読む。
+fn load_score_history_page(
     score_db: &ScoreDatabase,
-) -> Result<Vec<std::result::Result<BackfillScoreRow, InvalidScoreRow>>> {
+    after: Option<(i64, i64)>,
+    limit: u32,
+) -> Result<ScoreHistoryPage> {
     let mut stmt = score_db.conn().prepare(
         "SELECT
             id,
@@ -549,12 +593,21 @@ fn load_score_history_rows(
          FROM score_history
          JOIN score_history_ir_identity
            ON score_history_ir_identity.score_history_id = score_history.id
-         ORDER BY played_at ASC, id ASC",
+         WHERE ?1 IS NULL
+            OR played_at > ?1
+            OR (played_at = ?1 AND score_history.id > ?2)
+         ORDER BY played_at ASC, score_history.id ASC
+         LIMIT ?3",
     )?;
-    let rows = stmt.query_map([], |row| {
+    let (after_played_at, after_id) = after.unzip();
+    let rows = stmt.query_map(rusqlite::params![after_played_at, after_id, limit], |row| {
         let id: i64 = row.get(0)?;
-        Ok(score_history_row_from_row(row)
-            .map_err(|error| InvalidScoreRow { id, error: anyhow::Error::new(error) }))
+        let played_at: i64 = row.get(4)?;
+        Ok((
+            (played_at, id),
+            score_history_row_from_row(row)
+                .map_err(|error| InvalidScoreRow { id, error: anyhow::Error::new(error) }),
+        ))
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
 }
@@ -619,11 +672,14 @@ fn primary_chart_for_score(
     Ok(library_db.preferred_chart_metadata(sha256)?.into_iter().next().map(|source| source.chart))
 }
 
+fn replay_file_path(profile_root: &Path, replay_path: Option<&str>) -> Option<std::path::PathBuf> {
+    replay_path.filter(|value| !value.is_empty()).map(|path| profile_root.join(path))
+}
+
 fn replay_hash(profile_root: &Path, replay_path: Option<&str>) -> Result<Option<String>> {
-    let Some(replay_path) = replay_path.filter(|value| !value.is_empty()) else {
+    let Some(path) = replay_file_path(profile_root, replay_path) else {
         return Ok(None);
     };
-    let path = profile_root.join(replay_path);
     if !path.is_file() {
         return Ok(None);
     }

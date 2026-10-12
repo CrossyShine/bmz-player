@@ -1,10 +1,8 @@
-use std::collections::HashSet;
-
 use anyhow::{Result, bail};
 
 use crate::ir::backfill::{
-    IrLocalUploadOptions, IrLocalUploadReport, enqueue_local_score_jobs,
-    enqueue_local_score_jobs_with_processed, resolve_local_upload_target,
+    IrLocalUploadOptions, IrLocalUploadReport, IrLocalUploadScan, enqueue_local_score_jobs,
+    enqueue_local_score_jobs_with_scan, resolve_local_upload_target,
 };
 use crate::ir::sync::{IR_CLI_SYNC_BATCH_LIMIT, IrSyncReport};
 use crate::storage::library_db::LibraryDatabase;
@@ -221,7 +219,7 @@ pub async fn upload_local_all(
     let retry = IrManualSyncRetry::OncePerRun { started_at: run_started_at };
     let retry_filter = IrJobRetryFilter::FailedBefore(run_started_at);
     let mut breaker = IrFailureBreaker::default();
-    let mut processed = HashSet::new();
+    let mut scan = IrLocalUploadScan::default();
 
     loop {
         if is_cancelled(cancel) {
@@ -239,7 +237,7 @@ pub async fn upload_local_all(
         )?;
         if backlog.claimable > 0 {
             if options.resend {
-                processed.extend(network_db.unfinished_ir_score_local_ids(
+                scan.processed.extend(network_db.unfinished_ir_score_local_ids(
                     &provider_key,
                     &account_id,
                     IrJobKind::Score,
@@ -284,7 +282,7 @@ pub async fn upload_local_all(
             continue;
         }
 
-        let enqueue = enqueue_local_score_jobs_with_processed(
+        let enqueue = enqueue_local_score_jobs_with_scan(
             ctx.sync.profile_root,
             ctx.sync.ir_config,
             &score_db,
@@ -292,7 +290,7 @@ pub async fn upload_local_all(
             &mut network_db,
             options,
             now_unix_seconds(),
-            &mut processed,
+            &mut scan,
         )?;
         absorb_enqueue(&mut report, &enqueue);
         let limit_reached = enqueue.limit_reached;

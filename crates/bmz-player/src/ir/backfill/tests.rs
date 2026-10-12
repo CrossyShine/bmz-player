@@ -3,7 +3,7 @@ use crate::ir::download::{IR_SCORE_DOWNLOAD_SOURCE, import_ir_score_entries};
 use crate::ir::types::{IrJudgePayload, IrJudgeSidePayload, IrOwnScoreHistoryEntry};
 use crate::storage::library_db::{ChartImportRecord, LibraryDatabase};
 use crate::storage::migration::{LIBRARY_MIGRATIONS, SCORE_MIGRATIONS};
-use crate::storage::score_db::ScoreDatabase;
+use crate::storage::score_db::{ScoreDatabase, ScoreRecord};
 use bmz_chart::hash::compute_chart_identity;
 use bmz_chart::model::{ChartMetadata, PlayableChart};
 use bmz_core::time::TimeUs;
@@ -729,8 +729,8 @@ fn unreadable_history_rows_are_skipped_without_blocking_other_scores() {
         providers: vec![bmz],
         ..IrConfig::default()
     };
-    let mut processed = HashSet::new();
-    let report = enqueue_local_score_jobs_with_processed(
+    let mut scan = IrLocalUploadScan::default();
+    let report = enqueue_local_score_jobs_with_scan(
         std::path::Path::new("."),
         &ir_config,
         &score_db,
@@ -738,7 +738,7 @@ fn unreadable_history_rows_are_skipped_without_blocking_other_scores() {
         &mut network_db,
         &IrLocalUploadOptions::default(),
         1_800_000_000,
-        &mut processed,
+        &mut scan,
     )
     .unwrap();
 
@@ -748,7 +748,7 @@ fn unreadable_history_rows_are_skipped_without_blocking_other_scores() {
     assert!(network_db.has_ir_score_job("bmz", "account-a", IrJobKind::Score, valid_id).unwrap());
 
     // 同じ実行の次のbatchでは、失敗した行を再び報告しない。
-    let next = enqueue_local_score_jobs_with_processed(
+    let next = enqueue_local_score_jobs_with_scan(
         std::path::Path::new("."),
         &ir_config,
         &score_db,
@@ -756,9 +756,94 @@ fn unreadable_history_rows_are_skipped_without_blocking_other_scores() {
         &mut network_db,
         &IrLocalUploadOptions::default(),
         1_800_000_001,
-        &mut processed,
+        &mut scan,
     )
     .unwrap();
     assert_eq!((next.enqueued, next.skipped_invalid), (0, 0));
     assert!(next.messages.is_empty());
+}
+
+fn paging_fixture(histories: usize) -> (ScoreDatabase, LibraryDatabase, IrConfig, Vec<i64>) {
+    let mut score_db = test_score_db();
+    let mut library_db = test_library_db();
+    let chart = test_playable_chart("paged-backfill");
+    library_db
+        .upsert_chart_import(&ChartImportRecord {
+            root_id: None,
+            file_path: std::path::Path::new("/fixture/song.bms"),
+            file_size: 1,
+            modified_at: 1,
+            scanned_at: 1,
+            chart: &chart,
+        })
+        .unwrap();
+    let record = crate::ir::download::score_record_from_ir_entry(&imported_score_entry(
+        chart.identity.file_sha256,
+    ))
+    .unwrap();
+    let ids = (0..histories)
+        .map(|index| {
+            // 同じplayed_atの行もidで順序が決まる。
+            let record = ScoreRecord { played_at: 1_000 + (index / 2) as i64, ..record.clone() };
+            score_db.insert_score(&record).unwrap()
+        })
+        .collect();
+    let mut bmz = IrProviderConfig::bmz_ir();
+    bmz.provider_key = "bmz".to_string();
+    bmz.enabled = true;
+    bmz.account_id = "account-a".to_string();
+    let ir_config = IrConfig {
+        primary_provider: "bmz".to_string(),
+        providers: vec![bmz],
+        ..IrConfig::default()
+    };
+    (score_db, library_db, ir_config, ids)
+}
+
+#[test]
+fn repeated_batches_resume_after_the_last_enqueued_history() {
+    let (score_db, library_db, ir_config, ids) = paging_fixture(3);
+    let mut network_db = test_network_db();
+    let options = IrLocalUploadOptions { limit: 1, ..IrLocalUploadOptions::default() };
+    let mut scan = IrLocalUploadScan::default();
+    let mut batches = Vec::new();
+    for now in 0..4 {
+        let report = enqueue_local_score_jobs_with_scan(
+            std::path::Path::new("."),
+            &ir_config,
+            &score_db,
+            &library_db,
+            &mut network_db,
+            &options,
+            1_800_000_000 + now,
+            &mut scan,
+        )
+        .unwrap();
+        batches.push((report.scanned, report.enqueued, report.limit_reached));
+    }
+    // 各batchは前回の続きの1行だけを読む。全件投入後は何も読まない。
+    assert_eq!(batches, [(1, 1, true), (1, 1, true), (1, 1, true), (0, 0, false)]);
+    for id in ids {
+        assert!(network_db.has_ir_score_job("bmz", "account-a", IrJobKind::Score, id).unwrap());
+    }
+}
+
+#[test]
+fn history_scan_reads_every_row_across_pages_once() {
+    let histories = SCORE_HISTORY_SCAN_PAGE_SIZE as usize + 3;
+    let (score_db, library_db, ir_config, _) = paging_fixture(histories);
+    let mut network_db = test_network_db();
+    let dry_run = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &library_db,
+        &mut network_db,
+        &IrLocalUploadOptions { dry_run: true, ..IrLocalUploadOptions::default() },
+        1_800_000_000,
+    )
+    .unwrap();
+    assert_eq!(dry_run.scanned as usize, histories);
+    assert_eq!(dry_run.candidates as usize, histories);
+    assert_eq!(network_db.ir_score_job_status_counts(None, None).unwrap().pending, 0);
 }
