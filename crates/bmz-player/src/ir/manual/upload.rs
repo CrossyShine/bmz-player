@@ -1,8 +1,10 @@
+use std::collections::HashSet;
+
 use anyhow::{Result, bail};
 
 use crate::ir::backfill::{
     IrLocalUploadOptions, IrLocalUploadReport, enqueue_local_score_jobs,
-    resolve_local_upload_target,
+    enqueue_local_score_jobs_with_processed, resolve_local_upload_target,
 };
 use crate::ir::sync::{IR_CLI_SYNC_BATCH_LIMIT, IrSyncReport};
 use crate::storage::library_db::LibraryDatabase;
@@ -23,6 +25,10 @@ fn absorb_enqueue(report: &mut IrManualUploadReport, enqueue: &IrLocalUploadRepo
         report.skipped_already_submitted.saturating_add(enqueue.skipped_already_submitted);
     report.skipped_already_queued =
         report.skipped_already_queued.saturating_add(enqueue.skipped_already_queued);
+    report.skipped_resend_payload_unavailable = report
+        .skipped_resend_payload_unavailable
+        .saturating_add(enqueue.skipped_resend_payload_unavailable);
+    report.skipped_busy = report.skipped_busy.saturating_add(enqueue.skipped_busy);
     report.skipped_missing_chart =
         report.skipped_missing_chart.saturating_add(enqueue.skipped_missing_chart);
     report.skipped_course_stage =
@@ -186,6 +192,7 @@ pub async fn upload_local_all(
         account_id: account_id.clone(),
         ..IrManualUploadReport::default()
     };
+    let mut processed = HashSet::new();
 
     loop {
         if is_cancelled(cancel) {
@@ -200,6 +207,13 @@ pub async fn upload_local_all(
             IrJobKind::Score,
         )?;
         if queued > 0 {
+            if options.resend {
+                processed.extend(network_db.unfinished_ir_score_local_ids(
+                    &provider_key,
+                    &account_id,
+                    IrJobKind::Score,
+                )?);
+            }
             progress(IrManualProgress::ExistingQueued {
                 provider_key: provider_key.clone(),
                 account_id: account_id.clone(),
@@ -211,14 +225,16 @@ pub async fn upload_local_all(
                 report.stop = IrManualStop::Cancelled;
                 return Ok(report);
             }
-            if let Some(stop) = full_upload_stop_reason(&sync_report) {
+            if (sync_report.failed > 0 || report.remaining > 0)
+                && let Some(stop) = full_upload_stop_reason(&sync_report)
+            {
                 report.stop = stop;
                 return Ok(report);
             }
             continue;
         }
 
-        let enqueue = enqueue_local_score_jobs(
+        let enqueue = enqueue_local_score_jobs_with_processed(
             ctx.sync.profile_root,
             ctx.sync.ir_config,
             &score_db,
@@ -226,6 +242,7 @@ pub async fn upload_local_all(
             &mut network_db,
             options,
             now_unix_seconds(),
+            &mut processed,
         )?;
         absorb_enqueue(&mut report, &enqueue);
         let limit_reached = enqueue.limit_reached;
@@ -253,7 +270,9 @@ pub async fn upload_local_all(
             report.stop = IrManualStop::Cancelled;
             return Ok(report);
         }
-        if let Some(stop) = full_upload_stop_reason(&sync_report) {
+        if (sync_report.failed > 0 || report.remaining > 0)
+            && let Some(stop) = full_upload_stop_reason(&sync_report)
+        {
             report.stop = stop;
             return Ok(report);
         }

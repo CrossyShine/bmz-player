@@ -26,9 +26,11 @@ pub(super) fn print_progress(event: &IrManualProgress) {
                 println!("enqueued: {}", report.enqueued);
             }
             println!(
-                "skipped: already_submitted={}, already_queued={}, missing_chart={}, course_stage={}, autoplay={}",
+                "skipped: already_submitted={}, already_queued={}, resend_payload_unavailable={}, busy={}, missing_chart={}, course_stage={}, autoplay={}",
                 report.skipped_already_submitted,
                 report.skipped_already_queued,
+                report.skipped_resend_payload_unavailable,
+                report.skipped_busy,
                 report.skipped_missing_chart,
                 report.skipped_course_stage,
                 report.skipped_autoplay,

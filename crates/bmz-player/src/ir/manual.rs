@@ -129,6 +129,8 @@ pub struct IrManualUploadReport {
     pub remaining: u32,
     pub skipped_already_submitted: u32,
     pub skipped_already_queued: u32,
+    pub skipped_resend_payload_unavailable: u32,
+    pub skipped_busy: u32,
     pub skipped_missing_chart: u32,
     pub skipped_course_stage: u32,
     pub skipped_autoplay: u32,

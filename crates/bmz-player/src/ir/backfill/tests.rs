@@ -522,6 +522,27 @@ fn downloaded_scores_are_skipped_only_for_their_source_account_even_with_resend(
         candidate_dry_run_network.ir_score_job_status_counts(None, None).unwrap().pending,
         0
     );
+    let resend_dry_run = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &account_b_dry_run,
+        &score_db,
+        &library_db,
+        &mut candidate_dry_run_network,
+        &IrLocalUploadOptions {
+            provider: Some("bmz".to_string()),
+            dry_run: true,
+            resend: true,
+            ..Default::default()
+        },
+        1_800_000_002,
+    )
+    .unwrap();
+    assert_eq!(resend_dry_run.candidates, 1);
+    assert_eq!(resend_dry_run.enqueued, 0);
+    assert_eq!(
+        candidate_dry_run_network.ir_score_job_status_counts(None, None).unwrap().pending,
+        0
+    );
     assert_eq!(
         score_db.ir_submission_idempotency_key_for_history(local_score_id).unwrap(),
         key_before_dry_run
@@ -581,77 +602,87 @@ fn downloaded_scores_are_skipped_only_for_their_source_account_even_with_resend(
 }
 
 #[test]
-fn backfill_resend_preserves_an_existing_legacy_queued_payload() {
-    let mut network_db = test_network_db();
-    let target = TargetProvider {
-        provider_key: "bmz-official".to_string(),
-        account_id: "account-1".to_string(),
-    };
-    let payload = serde_json::json!({
-        "idempotency_key": "bmz-score-42",
-        "legacy_payload_marker": "keep-exactly",
-    })
-    .to_string();
-    network_db
-        .enqueue_ir_score_job(&NewIrScoreJob {
-            provider: target.provider_key.clone(),
-            account_id: target.account_id.clone(),
-            kind: IrJobKind::Score,
-            local_score_id: 42,
-            chart_sha256: [2; 32],
-            ln_policy: LnScorePolicy::ForceCn,
-            payload_json: payload.clone(),
-            now: 100,
-        })
+fn successful_snapshot_resend_does_not_need_current_chart_or_options() {
+    let mut score_db = test_score_db();
+    let chart_sha256 = [77; 32];
+    let mut entry = imported_score_entry(chart_sha256);
+    entry.score_id = "remote-stable".into();
+    let local_score_id = score_db
+        .insert_score(&crate::ir::download::score_record_from_ir_entry(&entry).unwrap())
         .unwrap();
 
-    assert_eq!(
-        existing_score_job_payload(&network_db, &target, 42).unwrap().as_deref(),
-        Some(payload.as_str())
-    );
-}
-
-#[test]
-fn backfill_resend_reuses_a_successful_legacy_submission_key() {
-    let mut network_db = test_network_db();
-    let target = TargetProvider {
-        provider_key: "bmz-official".to_string(),
-        account_id: "account-1".to_string(),
+    let mut provider = IrProviderConfig::bmz_ir();
+    provider.provider_key = "bmz".into();
+    provider.account_id = "account-a".into();
+    provider.enabled = true;
+    let ir_config = IrConfig {
+        primary_provider: "bmz".into(),
+        providers: vec![provider],
+        ..IrConfig::default()
     };
-    let legacy_key = "bmz-score-42";
+    let original_payload = r#"{"idempotency_key":"old-key-stable","result":{"marker":"original"},"play_options":{"replay_upload_intent":null}}"#;
+    let mut network_db = test_network_db();
     let job_id = network_db
         .enqueue_ir_score_job(&NewIrScoreJob {
-            provider: target.provider_key.clone(),
-            account_id: target.account_id.clone(),
+            provider: "bmz".into(),
+            account_id: "account-a".into(),
             kind: IrJobKind::Score,
-            local_score_id: 42,
-            chart_sha256: [2; 32],
-            ln_policy: LnScorePolicy::ForceCn,
-            payload_json: serde_json::json!({ "idempotency_key": legacy_key }).to_string(),
-            now: 100,
+            local_score_id,
+            chart_sha256,
+            ln_policy: LnScorePolicy::ForceLn,
+            payload_json: original_payload.into(),
+            now: 10,
         })
         .unwrap();
     network_db
         .complete_ir_score_job(
             &NewIrScoreSubmission {
                 job_id,
-                provider: target.provider_key.clone(),
-                account_id: target.account_id.clone(),
+                provider: "bmz".into(),
+                account_id: "account-a".into(),
                 kind: IrJobKind::Score,
-                local_score_id: 42,
-                remote_score_id: "remote-42".to_string(),
-                status: "succeeded".to_string(),
-                submitted_at: 101,
+                local_score_id,
+                remote_score_id: "remote-stable".into(),
+                status: "succeeded".into(),
+                submitted_at: 11,
                 log_path: String::new(),
                 error: String::new(),
             },
             None,
-            r#"{"score_id":"remote-42"}"#,
+            "{}",
         )
         .unwrap();
 
-    assert_eq!(
-        successful_submission_key(&network_db, &target, 42).unwrap().as_deref(),
-        Some(legacy_key)
-    );
+    let report = enqueue_local_score_jobs(
+        std::path::Path::new("."),
+        &ir_config,
+        &score_db,
+        &test_library_db(),
+        &mut network_db,
+        &IrLocalUploadOptions {
+            provider: Some("bmz".into()),
+            resend: true,
+            include_replay: true,
+            include_course_stages: true,
+            ..Default::default()
+        },
+        20,
+    )
+    .unwrap();
+    assert_eq!(report.enqueued, 1);
+    let job = network_db
+        .pending_ir_score_jobs_ignoring_backoff(20, 10)
+        .unwrap()
+        .into_iter()
+        .find(|job| job.local_score_id == local_score_id)
+        .unwrap();
+    assert_eq!(job.payload_json, original_payload);
+    assert_eq!(job_submission_key_from_json(&job.payload_json), "old-key-stable");
+}
+
+fn job_submission_key_from_json(payload: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(payload).unwrap()["idempotency_key"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }

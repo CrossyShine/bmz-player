@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -13,7 +13,9 @@ use crate::ln_policy::{LnScorePolicy, played_ln_mode};
 use crate::select_options::{ArrangeOption, DoubleOption, DoubleOptionScoreBucket};
 use crate::storage::common::{hash_to_hex, hex_to_hash};
 use crate::storage::library_db::{ChartAnalysis, ChartListItem, LibraryDatabase};
-use crate::storage::network_db::{IrJobKind, NetworkDatabase, NewIrScoreJob};
+use crate::storage::network_db::{
+    IrBackfillResendOutcome, IrJobKind, NetworkDatabase, NewIrScoreJob,
+};
 use crate::storage::score_db::{ScoreDatabase, ScoreSourceKind};
 
 use super::download::IR_SCORE_DOWNLOAD_SOURCE;
@@ -58,6 +60,8 @@ pub struct IrLocalUploadReport {
     pub enqueued: u32,
     pub skipped_already_submitted: u32,
     pub skipped_already_queued: u32,
+    pub skipped_resend_payload_unavailable: u32,
+    pub skipped_busy: u32,
     pub skipped_missing_chart: u32,
     pub skipped_course_stage: u32,
     pub skipped_autoplay: u32,
@@ -90,6 +94,28 @@ pub fn enqueue_local_score_jobs(
     options: &IrLocalUploadOptions,
     now: i64,
 ) -> Result<IrLocalUploadReport> {
+    enqueue_local_score_jobs_with_processed(
+        profile_root,
+        ir_config,
+        score_db,
+        library_db,
+        network_db,
+        options,
+        now,
+        &mut HashSet::new(),
+    )
+}
+
+pub(crate) fn enqueue_local_score_jobs_with_processed(
+    profile_root: &Path,
+    ir_config: &IrConfig,
+    score_db: &ScoreDatabase,
+    library_db: &LibraryDatabase,
+    network_db: &mut NetworkDatabase,
+    options: &IrLocalUploadOptions,
+    now: i64,
+    processed: &mut HashSet<i64>,
+) -> Result<IrLocalUploadReport> {
     let target = resolve_target_provider(ir_config, options.provider.as_deref())?;
     let limit = options.limit.max(1);
     let rows = load_score_history_rows(score_db)?;
@@ -101,6 +127,9 @@ pub fn enqueue_local_score_jobs(
 
     for row in rows {
         report.scanned += 1;
+        if options.resend && processed.contains(&row.id) {
+            continue;
+        }
 
         if !options.include_course_stages && row.course_score_id.is_some() {
             report.skipped_course_stage += 1;
@@ -113,6 +142,47 @@ pub fn enqueue_local_score_jobs(
         if has_score_from_target_ir_source(score_db, &target, row.id)? {
             report.skipped_already_submitted += 1;
             continue;
+        }
+        if options.resend {
+            match network_db.enqueue_backfill_score_resend(
+                &target.provider_key,
+                &target.account_id,
+                row.id,
+                now,
+                None,
+                options.dry_run,
+            )? {
+                IrBackfillResendOutcome::Enqueued if options.dry_run => {
+                    report.candidates += 1;
+                    continue;
+                }
+                IrBackfillResendOutcome::Enqueued => {
+                    processed.insert(row.id);
+                    report.candidates += 1;
+                    report.enqueued += 1;
+                    if report.enqueued >= limit {
+                        report.limit_reached = true;
+                        break;
+                    }
+                    continue;
+                }
+                IrBackfillResendOutcome::AlreadyPending => {
+                    processed.insert(row.id);
+                    report.skipped_already_queued += 1;
+                    continue;
+                }
+                IrBackfillResendOutcome::Busy => {
+                    processed.insert(row.id);
+                    report.skipped_busy += 1;
+                    continue;
+                }
+                IrBackfillResendOutcome::PayloadUnavailable => {
+                    processed.insert(row.id);
+                    report.skipped_resend_payload_unavailable += 1;
+                    continue;
+                }
+                IrBackfillResendOutcome::NeedsPayload => {}
+            }
         }
         if !options.resend {
             match existing_score_state(network_db, &target, row.id).with_context(|| {
@@ -156,34 +226,48 @@ pub fn enqueue_local_score_jobs(
             break;
         }
 
-        let preserved_payload = if options.resend {
-            existing_score_job_payload(network_db, &target, row.id)?
-        } else {
-            None
-        };
-        let payload_json = if let Some(payload_json) = preserved_payload {
-            payload_json
-        } else {
-            let mut payload =
-                build_local_score_submission(&row, &chart, analysis.as_ref(), replay_hash);
-            if options.resend
-                && let Some(existing_key) = successful_submission_key(network_db, &target, row.id)?
-            {
-                payload.idempotency_key = existing_key;
-            }
-            serde_json::to_string(&payload)?
-        };
-        network_db.enqueue_ir_score_job(&NewIrScoreJob {
+        let payload = build_local_score_submission(&row, &chart, analysis.as_ref(), replay_hash);
+        let new_job = NewIrScoreJob {
             provider: target.provider_key.clone(),
             account_id: target.account_id.clone(),
             kind: IrJobKind::Score,
             local_score_id: row.id,
             chart_sha256: row.chart_sha256,
             ln_policy: row.ln_policy,
-            payload_json,
+            payload_json: serde_json::to_string(&payload)?,
             now,
-        })?;
-        report.enqueued += 1;
+        };
+        if options.resend {
+            match network_db.enqueue_backfill_score_resend(
+                &target.provider_key,
+                &target.account_id,
+                row.id,
+                now,
+                Some(&new_job),
+                false,
+            )? {
+                IrBackfillResendOutcome::Enqueued => {
+                    report.enqueued += 1;
+                    processed.insert(row.id);
+                }
+                IrBackfillResendOutcome::AlreadyPending => {
+                    processed.insert(row.id);
+                    report.skipped_already_queued += 1;
+                }
+                IrBackfillResendOutcome::Busy => {
+                    processed.insert(row.id);
+                    report.skipped_busy += 1;
+                }
+                IrBackfillResendOutcome::PayloadUnavailable => {
+                    processed.insert(row.id);
+                    report.skipped_resend_payload_unavailable += 1;
+                }
+                IrBackfillResendOutcome::NeedsPayload => unreachable!("payload provided"),
+            }
+        } else {
+            network_db.enqueue_ir_score_job(&new_job)?;
+            report.enqueued += 1;
+        }
         if report.enqueued >= limit {
             report.limit_reached = true;
             break;
@@ -215,40 +299,6 @@ fn has_score_from_target_ir_source(
         |row| row.get(0),
     )?;
     Ok(exists)
-}
-
-fn existing_score_job_payload(
-    network_db: &NetworkDatabase,
-    target: &TargetProvider,
-    local_score_id: i64,
-) -> Result<Option<String>> {
-    Ok(network_db
-        .ir_score_jobs_for_local_score(IrJobKind::Score, local_score_id)?
-        .into_iter()
-        .find(|job| {
-            job.provider == target.provider_key
-                && job.account_id == target.account_id
-                && !job.payload_json.is_empty()
-        })
-        .map(|job| job.payload_json))
-}
-
-fn successful_submission_key(
-    network_db: &NetworkDatabase,
-    target: &TargetProvider,
-    local_score_id: i64,
-) -> Result<Option<String>> {
-    let key: String = network_db.conn().query_row(
-        "SELECT COALESCE((
-            SELECT submission_key FROM ir_score_success_ledger
-            WHERE provider = ?1 AND account_id = ?2 AND kind = 'score'
-              AND local_score_id = ?3
-            ORDER BY submitted_at DESC, submission_key DESC LIMIT 1
-        ), '')",
-        rusqlite::params![target.provider_key, target.account_id, local_score_id],
-        |row| row.get(0),
-    )?;
-    Ok((!key.is_empty()).then_some(key))
 }
 
 #[derive(Debug, Clone)]

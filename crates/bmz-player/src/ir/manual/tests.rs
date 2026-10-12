@@ -314,6 +314,28 @@ impl UploadFixture {
             assert_eq!(&status, expected_status, "job {job_id}");
         }
     }
+
+    fn seed_local_history(&self, id: i64, chart_hash: [u8; 32], played_at: i64) {
+        let conn = Connection::open(&self.score_db).unwrap();
+        conn.execute(
+            "INSERT INTO score_history (
+                id, chart_sha256, played_at, clear_type, gauge_type, gauge_value,
+                total_notes, ex_score, bp, cb, max_combo,
+                fast_pgreat, slow_pgreat, fast_great, slow_great, fast_good, slow_good,
+                fast_bad, slow_bad, fast_poor, slow_poor, fast_empty_poor, slow_empty_poor,
+                gauge_option, replay_path
+             ) VALUES (?1, ?2, ?3, 'Hard', 'Hard', 100.0, 2, 2, 0, 0, 2,
+                       2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'Hard', '')",
+            rusqlite::params![id, crate::storage::common::hash_to_hex(&chart_hash), played_at],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO score_history_ir_identity (score_history_id, idempotency_key)
+             VALUES (?1, ?2)",
+            rusqlite::params![id, format!("backfill-key-{id}")],
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for UploadFixture {
@@ -400,6 +422,119 @@ async fn empty_upload_local_batch_completes_without_touching_other_jobs() {
     assert_eq!(report.stop, IrManualStop::Completed);
     assert_eq!(report.remaining, 0);
     fixture.assert_job_statuses(&expected);
+}
+
+fn complete_pending_target_scores(network_path: &std::path::Path, observed: &mut Vec<i64>) {
+    let mut db = NetworkDatabase::open(network_path).unwrap();
+    let now = i64::MAX / 2;
+    let jobs = db.pending_ir_score_jobs_ignoring_backoff(now, 100).unwrap();
+    for job in jobs.into_iter().filter(|job| {
+        job.provider == "target-a" && job.account_id == "account-a" && job.kind == IrJobKind::Score
+    }) {
+        observed.push(job.local_score_id);
+        db.complete_ir_score_job(
+            &crate::storage::network_db::NewIrScoreSubmission {
+                job_id: job.id,
+                provider: job.provider,
+                account_id: job.account_id,
+                kind: job.kind,
+                local_score_id: job.local_score_id,
+                remote_score_id: format!("mock-remote-{}", job.local_score_id),
+                status: "succeeded".into(),
+                submitted_at: now,
+                log_path: String::new(),
+                error: String::new(),
+            },
+            None,
+            "{}",
+        )
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn upload_local_all_resend_finishes_two_histories_once_with_preexisting_queue() {
+    let fixture = UploadFixture::new("upload-all-resend-finite");
+    let first_id = 101;
+    let second_id = 102;
+    fixture.seed_local_history(first_id, [101; 32], 100);
+    fixture.seed_local_history(second_id, [102; 32], 200);
+
+    let mut network_db = NetworkDatabase::open(&fixture.network_db).unwrap();
+    let now = now_unix_seconds();
+    let pending_id = enqueue_upload_job(
+        &mut network_db,
+        "target-a",
+        "account-a",
+        IrJobKind::Score,
+        first_id,
+        now,
+    );
+    let successful_id = enqueue_upload_job(
+        &mut network_db,
+        "target-a",
+        "account-a",
+        IrJobKind::Score,
+        second_id,
+        now,
+    );
+    network_db
+        .complete_ir_score_job(
+            &crate::storage::network_db::NewIrScoreSubmission {
+                job_id: successful_id,
+                provider: "target-a".into(),
+                account_id: "account-a".into(),
+                kind: IrJobKind::Score,
+                local_score_id: second_id,
+                remote_score_id: "mock-remote-102".into(),
+                status: "succeeded".into(),
+                submitted_at: now,
+                log_path: String::new(),
+                error: String::new(),
+            },
+            None,
+            "{}",
+        )
+        .unwrap();
+    drop(network_db);
+
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    let mut observed = Vec::new();
+    let mut batches_seen = 0;
+    let mut progress = |event| {
+        if let IrManualProgress::FullUploadBatch { batch } = &event {
+            batches_seen = *batch;
+            assert!(*batch <= 4, "upload_local_all did not finish in a bounded number of batches");
+        }
+        if matches!(event, IrManualProgress::ExistingQueued { .. })
+            || matches!(event, IrManualProgress::Enqueued { all: true, .. })
+        {
+            complete_pending_target_scores(&fixture.network_db, &mut observed);
+        }
+    };
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        upload_local_all(
+            &fixture.context(),
+            &IrLocalUploadOptions {
+                provider: Some("target-a".into()),
+                resend: true,
+                limit: 1,
+                ..Default::default()
+            },
+            &mut progress,
+            &cancel,
+        ),
+    )
+    .await
+    .expect("full resend should terminate")
+    .unwrap();
+
+    assert_eq!(report.stop, IrManualStop::Completed);
+    assert!(batches_seen <= 4);
+    assert_eq!(report.enqueued, 1);
+    assert_eq!(observed, [first_id, second_id]);
+    fixture.assert_job_statuses(&[(pending_id, "succeeded"), (successful_id, "succeeded")]);
 }
 
 #[tokio::test]

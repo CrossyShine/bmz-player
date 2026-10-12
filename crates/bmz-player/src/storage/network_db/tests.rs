@@ -120,9 +120,12 @@ fn submission_identity_migration_preserves_jobs_and_submission_history() {
         VALUES (5, 'bmz', 'player', 'score', 95, 'hash', 'ForceLn',
                 '{\"idempotency_key\":\"bmz-score-95\"}', 'failed', 3, 999, 'offline', 1, 2),
                (6, 'bmz', 'player', 'score', 96, 'hash', 'ForceLn',
-                '{\"idempotency_key\":\"bmz-score-96\"}', 'succeeded', 0, 2, '', 1, 2);
+                '', 'succeeded', 0, 2, '', 1, 2),
+               (7, 'bmz', 'player', 'score', 97, 'hash', 'ForceLn',
+                '', 'succeeded', 0, 2, '', 1, 2);
         INSERT INTO ir_score_submissions (job_id, provider, local_score_id, status, submitted_at)
-        VALUES (5, 'bmz', 95, 'failed', 2), (6, 'bmz', 96, 'succeeded', 3);",
+        VALUES (5, 'bmz', 95, 'failed', 2), (6, 'bmz', 96, 'succeeded', 3),
+               (7, 'bmz', 97, 'succeeded', 4);",
     )
     .unwrap();
     run_migrations(&mut conn, NETWORK_MIGRATIONS).unwrap();
@@ -142,7 +145,31 @@ fn submission_identity_migration_preserves_jobs_and_submission_history() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(migrated, ("bmz-score-96".into(), 96, String::new()));
+    assert_eq!(migrated, ("local:96".into(), 96, String::new()));
+    let snapshot: String = conn
+        .query_row(
+            "SELECT submission_payload_json FROM ir_score_success_ledger
+         WHERE local_score_id = 96",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let job_payload: String = conn
+        .query_row("SELECT payload_json FROM ir_score_jobs WHERE local_score_id = 96", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(job_payload.is_empty());
+    assert_eq!(snapshot, job_payload);
+    let unavailable: String = conn
+        .query_row(
+            "SELECT submission_payload_json FROM ir_score_success_ledger
+         WHERE local_score_id = 97",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(unavailable.is_empty());
     assert!(
         conn.prepare("PRAGMA foreign_key_check")
             .unwrap()
@@ -156,15 +183,44 @@ fn submission_identity_migration_preserves_jobs_and_submission_history() {
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM ir_score_submissions", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert_eq!(
         conn.query_row("SELECT COUNT(*) FROM ir_score_success_ledger", [], |row| {
             row.get::<_, i64>(0)
         })
         .unwrap(),
-        1
+        2
     );
+}
+
+#[test]
+fn v5_success_ledger_migration_snapshots_only_retained_job_payloads() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    configure_connection(&conn).unwrap();
+    run_migrations(&mut conn, &NETWORK_MIGRATIONS[..5]).unwrap();
+    conn.execute_batch(
+        "INSERT INTO ir_score_jobs (
+            id, provider, account_id, kind, local_score_id, chart_sha256, ln_policy,
+            payload_json, status, attempt_count, next_attempt_at, last_error,
+            created_at, updated_at, submission_key
+         ) VALUES
+            (1, 'p', 'a', 'score', 1, '0000000000000000000000000000000000000000000000000000000000000001', 'ForceLn',
+             '{\"idempotency_key\":\"old-1\"}', 'succeeded', 0, 1, '', 1, 1, 'old-1'),
+            (2, 'p', 'a', 'score', 2, '0000000000000000000000000000000000000000000000000000000000000002', 'ForceLn',
+             '', 'succeeded', 0, 1, '', 1, 1, 'old-2');
+         INSERT INTO ir_score_success_ledger (
+            provider, account_id, kind, submission_key, local_score_id, remote_score_id, submitted_at
+         ) VALUES ('p', 'a', 'score', 'old-1', 1, 'remote-1', 1),
+                  ('p', 'a', 'score', 'old-2', 2, 'remote-2', 1);",
+    ).unwrap();
+    run_migrations(&mut conn, &NETWORK_MIGRATIONS[5..]).unwrap();
+    let migrated: Vec<(i64, String)> = conn.prepare(
+        "SELECT local_score_id, submission_payload_json FROM ir_score_success_ledger ORDER BY local_score_id"
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(migrated[0], (1, r#"{"idempotency_key":"old-1"}"#.to_string()));
+    assert_eq!(migrated[1], (2, String::new()));
 }
 
 #[test]
@@ -542,6 +598,214 @@ fn completing_score_job_atomically_enqueues_replay_job() {
         .query_row("SELECT COUNT(*) FROM ir_score_submissions", [], |row| row.get(0))
         .unwrap();
     assert_eq!(submissions, 1);
+}
+
+fn completed_snapshot_job(
+    db: &mut NetworkDatabase,
+    local_score_id: i64,
+    now: i64,
+) -> (i64, String) {
+    let payload = serde_json::json!({
+        "idempotency_key": format!("legacy-key-{local_score_id}"),
+        "result": {"ex_score": 1234}, "play_options": {"marker": "keep"}
+    })
+    .to_string();
+    let job_id = db
+        .enqueue_ir_score_job(&NewIrScoreJob {
+            provider: "bmz-official".into(),
+            account_id: "account-1".into(),
+            kind: IrJobKind::Score,
+            local_score_id,
+            chart_sha256: [3; 32],
+            ln_policy: LnScorePolicy::ForceLn,
+            payload_json: payload.clone(),
+            now,
+        })
+        .unwrap();
+    db.complete_ir_score_job(
+        &NewIrScoreSubmission {
+            job_id,
+            provider: "bmz-official".into(),
+            account_id: "account-1".into(),
+            kind: IrJobKind::Score,
+            local_score_id,
+            remote_score_id: format!("remote-{local_score_id}"),
+            status: "succeeded".into(),
+            submitted_at: now + 1,
+            log_path: String::new(),
+            error: String::new(),
+        },
+        None,
+        "{}",
+    )
+    .unwrap();
+    (job_id, payload)
+}
+
+#[test]
+fn backfill_resend_reuses_success_snapshot_and_key_after_job_pruning() {
+    let mut db = open_network_db();
+    let (job_id, payload) = completed_snapshot_job(&mut db, 42, 100);
+    let snapshot: String = db
+        .conn()
+        .query_row(
+            "SELECT submission_payload_json FROM ir_score_success_ledger WHERE local_score_id = 42",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(snapshot, payload);
+
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 42, 200, None, false)
+            .unwrap(),
+        IrBackfillResendOutcome::Enqueued
+    );
+    let (status, body, key): (String, String, String) = db
+        .conn()
+        .query_row(
+            "SELECT status, payload_json, submission_key FROM ir_score_jobs WHERE id = ?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "pending");
+    assert_eq!(body, payload);
+    assert_eq!(key, "legacy-key-42");
+
+    db.complete_ir_score_job(
+        &NewIrScoreSubmission {
+            job_id,
+            provider: "bmz-official".into(),
+            account_id: "account-1".into(),
+            kind: IrJobKind::Score,
+            local_score_id: 42,
+            remote_score_id: "remote-42".into(),
+            status: "succeeded".into(),
+            submitted_at: 300,
+            log_path: String::new(),
+            error: String::new(),
+        },
+        None,
+        "{}",
+    )
+    .unwrap();
+    assert_eq!(
+        db.prune_succeeded_ir_score_jobs_with_policy(40 * 86_400, 30 * 86_400, 0).unwrap(),
+        1
+    );
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 42, 400, None, false)
+            .unwrap(),
+        IrBackfillResendOutcome::Enqueued
+    );
+    let (body, key): (String, String) = db
+        .conn()
+        .query_row(
+            "SELECT payload_json, submission_key FROM ir_score_jobs WHERE local_score_id = 42",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(body, payload);
+    assert_eq!(key, "legacy-key-42");
+}
+
+#[test]
+fn backfill_resend_preserves_failed_payload_and_leaves_pending_or_leased_jobs_alone() {
+    let mut db = open_network_db();
+    let payload = r#"{"idempotency_key":"legacy-43","exact":"body"}"#;
+    let failed = db
+        .enqueue_ir_score_job(&NewIrScoreJob {
+            provider: "bmz-official".into(),
+            account_id: "account-1".into(),
+            kind: IrJobKind::Score,
+            local_score_id: 43,
+            chart_sha256: [4; 32],
+            ln_policy: LnScorePolicy::ForceLn,
+            payload_json: payload.into(),
+            now: 10,
+        })
+        .unwrap();
+    db.mark_ir_score_job_failed(failed, 20, "retry", None).unwrap();
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 43, 30, None, false).unwrap(),
+        IrBackfillResendOutcome::Enqueued
+    );
+    let current: String = db
+        .conn()
+        .query_row("SELECT payload_json FROM ir_score_jobs WHERE id = ?1", [failed], |r| r.get(0))
+        .unwrap();
+    assert_eq!(current, payload);
+
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 43, 31, None, false).unwrap(),
+        IrBackfillResendOutcome::AlreadyPending
+    );
+    db.mark_ir_score_job_status(failed, IrScoreJobStatus::Sending, 32, "").unwrap();
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 43, 33, None, false).unwrap(),
+        IrBackfillResendOutcome::Busy
+    );
+    let status: String = db
+        .conn()
+        .query_row("SELECT status FROM ir_score_jobs WHERE id = ?1", [failed], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "sending");
+}
+
+#[test]
+fn backfill_resend_reports_missing_legacy_snapshot_without_reconstructing() {
+    let mut db = open_network_db();
+    completed_snapshot_job(&mut db, 44, 100);
+    db.conn.execute("UPDATE ir_score_success_ledger SET submission_payload_json = '' WHERE local_score_id = 44", []).unwrap();
+    db.prune_succeeded_ir_score_jobs_with_policy(40 * 86_400, 30 * 86_400, 0).unwrap();
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 44, 200, None, false)
+            .unwrap(),
+        IrBackfillResendOutcome::PayloadUnavailable
+    );
+    assert_eq!(
+        db.enqueue_backfill_score_resend(
+            "bmz-official",
+            "account-1",
+            44,
+            200,
+            Some(&NewIrScoreJob {
+                provider: "bmz-official".into(),
+                account_id: "account-1".into(),
+                kind: IrJobKind::Score,
+                local_score_id: 44,
+                chart_sha256: [4; 32],
+                ln_policy: LnScorePolicy::ForceLn,
+                payload_json: "reconstructed".into(),
+                now: 200,
+            }),
+            false
+        )
+        .unwrap(),
+        IrBackfillResendOutcome::PayloadUnavailable
+    );
+}
+
+#[test]
+fn backfill_resend_preview_does_not_requeue_or_insert_jobs() {
+    let mut db = open_network_db();
+    let (job_id, _) = completed_snapshot_job(&mut db, 45, 100);
+    assert_eq!(
+        db.enqueue_backfill_score_resend("bmz-official", "account-1", 45, 200, None, true).unwrap(),
+        IrBackfillResendOutcome::Enqueued
+    );
+    let (status, body): (String, String) = db
+        .conn()
+        .query_row(
+            "SELECT status, payload_json FROM ir_score_jobs WHERE id = ?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "succeeded");
+    assert!(body.is_empty());
 }
 
 #[test]

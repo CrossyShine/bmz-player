@@ -88,8 +88,13 @@ SHA-256 fallback でラベルを付与する。
   未送信状態へ戻さない。
   成功済み job は payload を空にし、同期後に 30 日以内または最新 500 件だけを
   `network.db` に保持する。未送信 / 失敗 / 送信中 job は剪定対象外。成功判定と
-  remote score ID の紐付けは job/log の保持期間から独立した小さな成功台帳にも保存し、
+  remote score ID の紐付けは job/log の保持期間から独立した成功台帳にも保存し、
   pruning後も upload-local の既送信判定と download-scores の既存履歴リンクに使う。
+  成功台帳は成功時に元のrequest payload、chart hash、LN policyも同一transactionで保存する。
+  成功履歴ごとに元request body分の容量を台帳で保持する一方、job本体の保持期間は従来どおりにする。
+  snapshotをjob pruning後の安全な `--resend` に使う。元payloadが消去済みの旧成功履歴は本文を
+  再構築せず再送不可として数え、CLIは非ゼロで終了する。IR cleanupではsnapshotも台帳と
+  同じtransactionで削除する。
   migration は残っている成功submissionから台帳を作るが、過去に pruning 済みの
   submission にしかなかった remote ID / 紐付けは復元できない。
 - local backfill: `bmz ir upload-local [--dry-run] [--limit N] [--sync] [--all]` で
@@ -104,6 +109,10 @@ SHA-256 fallback でラベルを付与する。
   `--all` は `--sync` を含む完走モードで、既存queueの排出と次の投入batchを候補が
   なくなるまで繰り返す。送信失敗または他プロセスの `sending` job で進捗できない場合は
   非ゼロで終了し、retry/backoff または5分のlease後に再実行する。
+  `--resend` は失敗済みjob・成功snapshotを同じidempotency keyとrequest payloadで再queueする。
+  既存pending jobと有効なsending leaseは変更せず、`enqueued` は実際に再queueした件数を示す。
+  `--all --resend` は1回の実行内で各履歴を最大1回だけ処理する。`--dry-run --resend` は
+  状態を書き換えず、元payloadが不足して再送できない履歴も別カウンターで報告する。
   送信直前にdevice keyで署名し、サーバー側では `signed_backfill` として保存する。
   `source_kind`、1P/2Pの配置、実際に適用したDPオプションも送信し、ランキング用の
   `double_option` バケットとは分けて個別スコアの履歴に保持する。
@@ -848,7 +857,7 @@ retryごとに変わり得るevidenceやclient version、譜面の表示用metad
 
 新しいプレイの送信keyは `bmz-score-v2-<UUID v4>` をenqueue前に一度だけ生成し、
 payloadに保存する。HTTP retryでは保存済みkeyを再利用する。ローカルscore IDは
-keyの一意性には使わない。既存スコアの再送や既存jobの再enqueueは行わない。
+keyの一意性には使わない。通常リザルト送信では既存スコアの再送や既存jobの再enqueueは行わない。
 local backfillのkeyも `score_history` ごとの永続UUIDを使う。score DB migrationで既存履歴へ
 keyを割り当て、新規履歴は保存transaction内で生成する。同じ履歴を再実行・DB再openしても
 keyは変わらず、別profileで同じhistory IDになってもkeyは衝突しない。profile DBを複製した
@@ -1967,7 +1976,10 @@ CREATE INDEX idx_ir_score_submissions_local_score
 `ir_score_success_ledger` は成功したjobの idempotency key、local / remote score IDを
 `ir_score_jobs` への外部キーなしで保持する。jobの30日 / 最新500件pruningでは削除せず、
 upload-local、download-scores、attestation、IR cleanup が成功履歴を参照する。
-cleanupで対応するlocal scoreを削除するときは、submission/jobと同じtransactionで台帳も消す。
+成功時のrequest payloadと譜面hash / LN policyも台帳へsnapshotするため、pruning後も
+元の内容を保った `--resend` ができる。旧履歴のsnapshotが空なら安全に再構築できないため
+再送不可とする。cleanupで対応するlocal scoreを削除するときは、submission/jobと同じ
+transactionで台帳とpayload snapshotも消す。
 
 ### Local score device type
 

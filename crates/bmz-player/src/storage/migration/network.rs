@@ -181,4 +181,42 @@ pub const NETWORK_MIGRATIONS: &[Migration] = &[
                 ON ir_score_success_ledger(provider, account_id, remote_score_id);",
         ],
     },
+    Migration {
+        version: 6,
+        statements: &[
+            "ALTER TABLE ir_score_success_ledger
+                ADD COLUMN submission_payload_json TEXT NOT NULL DEFAULT '';",
+            "ALTER TABLE ir_score_success_ledger
+                ADD COLUMN chart_sha256 TEXT NOT NULL DEFAULT '';",
+            "ALTER TABLE ir_score_success_ledger
+                ADD COLUMN ln_policy TEXT NOT NULL DEFAULT '';",
+            // Only retained succeeded jobs can provide their original request body.
+            // Already-pruned/cleared payloads intentionally remain unavailable.
+            "UPDATE ir_score_success_ledger
+             SET submission_payload_json = COALESCE((
+                    SELECT payload_json FROM ir_score_jobs
+                    WHERE provider = ir_score_success_ledger.provider
+                      AND account_id = ir_score_success_ledger.account_id
+                      AND kind = ir_score_success_ledger.kind
+                      AND submission_key = ir_score_success_ledger.submission_key
+                      AND status = 'succeeded'
+                 ), ''),
+                 chart_sha256 = COALESCE((
+                    SELECT chart_sha256 FROM ir_score_jobs
+                    WHERE provider = ir_score_success_ledger.provider
+                      AND account_id = ir_score_success_ledger.account_id
+                      AND kind = ir_score_success_ledger.kind
+                      AND submission_key = ir_score_success_ledger.submission_key
+                      AND status = 'succeeded'
+                 ), ''),
+                 ln_policy = COALESCE((
+                    SELECT ln_policy FROM ir_score_jobs
+                    WHERE provider = ir_score_success_ledger.provider
+                      AND account_id = ir_score_success_ledger.account_id
+                      AND kind = ir_score_success_ledger.kind
+                      AND submission_key = ir_score_success_ledger.submission_key
+                      AND status = 'succeeded'
+                 ), '');",
+        ],
+    },
 ];

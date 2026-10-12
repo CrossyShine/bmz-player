@@ -1,3 +1,7 @@
+use anyhow::Context;
+
+const IR_JOB_SENDING_STALE_AFTER_SECONDS: i64 = 300;
+
 // Payloads without a submission identifier are legacy/internal jobs.
 fn job_submission_key(job: &NewIrScoreJob) -> String {
     serde_json::from_str::<serde_json::Value>(&job.payload_json)
@@ -19,20 +23,23 @@ fn upsert_ir_score_success_ledger(
     if record.status != "succeeded" {
         return Ok(());
     }
-    let submission_key: String = tx.query_row(
-        "SELECT submission_key FROM ir_score_jobs WHERE id = ?1",
+    let (submission_key, payload_json, chart_sha256, ln_policy): (String, String, String, String) = tx.query_row(
+        "SELECT submission_key, payload_json, chart_sha256, ln_policy FROM ir_score_jobs WHERE id = ?1",
         [record.job_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     tx.execute(
         "INSERT INTO ir_score_success_ledger (
             provider, account_id, kind, submission_key, local_score_id,
-            remote_score_id, submitted_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            remote_score_id, submitted_at, submission_payload_json, chart_sha256, ln_policy
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(provider, account_id, kind, submission_key) DO UPDATE SET
             local_score_id = excluded.local_score_id,
             remote_score_id = excluded.remote_score_id,
-            submitted_at = excluded.submitted_at",
+            submitted_at = excluded.submitted_at,
+            submission_payload_json = CASE WHEN ir_score_success_ledger.submission_payload_json = '' THEN excluded.submission_payload_json ELSE ir_score_success_ledger.submission_payload_json END,
+            chart_sha256 = CASE WHEN ir_score_success_ledger.chart_sha256 = '' THEN excluded.chart_sha256 ELSE ir_score_success_ledger.chart_sha256 END,
+            ln_policy = CASE WHEN ir_score_success_ledger.ln_policy = '' THEN excluded.ln_policy ELSE ir_score_success_ledger.ln_policy END",
         params![
             record.provider,
             record.account_id,
@@ -41,6 +48,9 @@ fn upsert_ir_score_success_ledger(
             record.local_score_id,
             record.remote_score_id,
             record.submitted_at,
+            payload_json,
+            chart_sha256,
+            ln_policy,
         ],
     )?;
     Ok(())
@@ -220,6 +230,159 @@ impl NetworkDatabase {
             "IR submission identifier collision for job {id}"
         );
         Ok(id)
+    }
+
+    /// Backfill-only resend path. Existing payloads and idempotency keys are kept byte-for-byte;
+    /// a succeeded job whose payload was already discarded can only be retried from its snapshot.
+    pub fn enqueue_backfill_score_resend(
+        &mut self,
+        provider: &str,
+        account_id: &str,
+        local_score_id: i64,
+        now: i64,
+        fallback: Option<&NewIrScoreJob>,
+        preview: bool,
+    ) -> Result<IrBackfillResendOutcome> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active: Option<(String, i64)> = tx.query_row(
+            "SELECT status, updated_at FROM ir_score_jobs
+             WHERE provider = ?1 AND account_id = ?2 AND kind = 'score' AND local_score_id = ?3
+               AND status IN ('pending', 'sending')
+             ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, updated_at DESC, id DESC LIMIT 1",
+            params![provider, account_id, local_score_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((status, updated_at)) = active {
+            if status == "pending" {
+                tx.commit()?;
+                return Ok(IrBackfillResendOutcome::AlreadyPending);
+            }
+            if updated_at > now.saturating_sub(IR_JOB_SENDING_STALE_AFTER_SECONDS) {
+                tx.commit()?;
+                return Ok(IrBackfillResendOutcome::Busy);
+            }
+        }
+        let existing: Option<(i64, String, String, String)> = tx
+            .query_row(
+                "SELECT id, status, payload_json, submission_key FROM ir_score_jobs
+                 WHERE provider = ?1 AND account_id = ?2 AND kind = 'score' AND local_score_id = ?3
+                 ORDER BY updated_at DESC, id DESC LIMIT 1",
+                params![provider, account_id, local_score_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+
+        if let Some((job_id, status, payload, submission_key)) = existing {
+            if status == "pending" {
+                tx.commit()?;
+                return Ok(IrBackfillResendOutcome::AlreadyPending);
+            }
+            if status == "sending" {
+                let updated_at: i64 = tx.query_row(
+                    "SELECT updated_at FROM ir_score_jobs WHERE id = ?1",
+                    [job_id],
+                    |row| row.get(0),
+                )?;
+                if updated_at > now.saturating_sub(IR_JOB_SENDING_STALE_AFTER_SECONDS) {
+                    tx.commit()?;
+                    return Ok(IrBackfillResendOutcome::Busy);
+                }
+            }
+            let (payload, chart, ln): (String, String, String) = if status == "succeeded" {
+                tx.query_row(
+                    "SELECT submission_payload_json, submission_key, chart_sha256, ln_policy
+                     FROM ir_score_success_ledger
+                     WHERE provider = ?1 AND account_id = ?2 AND kind = 'score' AND local_score_id = ?3
+                       AND submission_key = ?4
+                     ORDER BY submitted_at DESC, submission_key DESC LIMIT 1",
+                    params![provider, account_id, local_score_id, submission_key],
+                    |row| Ok((row.get(0)?, row.get(2)?, row.get(3)?)),
+                ).optional()?.unwrap_or_default()
+            } else {
+                let (chart, ln): (String, String) = tx.query_row(
+                    "SELECT chart_sha256, ln_policy FROM ir_score_jobs WHERE id = ?1",
+                    [job_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                (payload, chart, ln)
+            };
+            if payload.is_empty() {
+                tx.commit()?;
+                return Ok(IrBackfillResendOutcome::PayloadUnavailable);
+            }
+            if preview {
+                tx.commit()?;
+                return Ok(IrBackfillResendOutcome::Enqueued);
+            }
+            tx.execute(
+                "UPDATE ir_score_jobs SET payload_json = ?2, status = 'pending',
+                    next_attempt_at = ?3, last_error = '', updated_at = ?3,
+                    chart_sha256 = ?4, ln_policy = ?5
+                 WHERE id = ?1",
+                params![job_id, payload, now, chart, ln],
+            )?;
+            tx.commit()?;
+            return Ok(IrBackfillResendOutcome::Enqueued);
+        }
+
+        let snapshot: Option<(String, String, String, String)> = tx
+            .query_row(
+                "SELECT submission_payload_json, submission_key, chart_sha256, ln_policy
+                 FROM ir_score_success_ledger
+                 WHERE provider = ?1 AND account_id = ?2 AND kind = 'score' AND local_score_id = ?3
+                 ORDER BY submitted_at DESC, submission_key DESC LIMIT 1",
+                params![provider, account_id, local_score_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let (job, key) = if let Some((payload, key, chart, ln)) = snapshot {
+            if payload.is_empty() {
+                tx.commit()?;
+                return Ok(IrBackfillResendOutcome::PayloadUnavailable);
+            }
+            (
+                NewIrScoreJob {
+                    provider: provider.to_owned(),
+                    account_id: account_id.to_owned(),
+                    kind: IrJobKind::Score,
+                    local_score_id,
+                    chart_sha256: hex_to_hash(&chart)?,
+                    ln_policy: LnScorePolicy::from_str_opt(&ln)
+                        .context("invalid LN policy in IR success ledger")?,
+                    payload_json: payload,
+                    now,
+                },
+                key,
+            )
+        } else if let Some(job) = fallback {
+            (job.clone(), job_submission_key(job))
+        } else {
+            tx.commit()?;
+            return Ok(IrBackfillResendOutcome::NeedsPayload);
+        };
+        if preview {
+            tx.commit()?;
+            return Ok(IrBackfillResendOutcome::Enqueued);
+        }
+        tx.execute(
+            "INSERT INTO ir_score_jobs (
+                provider, account_id, kind, local_score_id, chart_sha256, ln_policy,
+                payload_json, status, attempt_count, next_attempt_at, last_error,
+                created_at, updated_at, submission_key
+             ) VALUES (?1, ?2, 'score', ?3, ?4, ?5, ?6, 'pending', 0, ?7, '', ?7, ?7, ?8)",
+            params![
+                job.provider,
+                job.account_id,
+                job.local_score_id,
+                hash_to_hex(&job.chart_sha256),
+                job.ln_policy.as_str(),
+                job.payload_json,
+                now,
+                key
+            ],
+        )?;
+        tx.commit()?;
+        Ok(IrBackfillResendOutcome::Enqueued)
     }
 
     pub fn pending_ir_score_jobs(&self, now: i64, limit: u32) -> Result<Vec<IrScoreJobRecord>> {
@@ -496,6 +659,23 @@ impl NetworkDatabase {
             |row| row.get(0),
         )?;
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+
+    pub fn unfinished_ir_score_local_ids(
+        &self,
+        provider: &str,
+        account_id: &str,
+        kind: IrJobKind,
+    ) -> Result<Vec<i64>> {
+        let mut statement = self.conn.prepare(
+            "SELECT DISTINCT local_score_id FROM ir_score_jobs
+             WHERE provider = ?1 AND account_id = ?2 AND kind = ?3
+               AND status IN ('pending', 'sending', 'failed')",
+        )?;
+        statement
+            .query_map(params![provider, account_id, kind.as_str()], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 送信キューの一覧。`payload_json` を読まない軽量版。

@@ -32,11 +32,24 @@ pub(super) async fn upload_local(
     let (_keep_alive, cancel) = no_cancel();
     let mut sink = |event| print_progress(&event);
     if !all {
-        upload_local_batch(&ctx, &options, sync_after_enqueue, &mut sink, &cancel).await?;
+        let report =
+            upload_local_batch(&ctx, &options, sync_after_enqueue, &mut sink, &cancel).await?;
+        if report.skipped_resend_payload_unavailable > 0 {
+            bail!(
+                "{} succeeded score(s) cannot be resent because their original request payload is unavailable",
+                report.skipped_resend_payload_unavailable
+            );
+        }
         return Ok(());
     }
 
     let report = upload_local_all(&ctx, &options, &mut sink, &cancel).await?;
+    if report.skipped_resend_payload_unavailable > 0 {
+        bail!(
+            "{} succeeded score(s) cannot be resent because their original request payload is unavailable",
+            report.skipped_resend_payload_unavailable
+        );
+    }
     match report.stop {
         IrManualStop::FailedJobs { failed } => bail!(
             "full local upload stopped after {} submissions because {failed} jobs failed",

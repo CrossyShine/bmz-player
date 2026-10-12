@@ -21,6 +21,15 @@ pub enum IrScoreJobStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrBackfillResendOutcome {
+    Enqueued,
+    AlreadyPending,
+    Busy,
+    PayloadUnavailable,
+    NeedsPayload,
+}
+
 mod model;
 mod operations;
 mod rows;
