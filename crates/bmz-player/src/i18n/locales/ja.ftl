@@ -286,6 +286,7 @@ settings-audio-auto-driver-default = 自動
 settings-audio-sample-rate = サンプルレート
 settings-audio-buffer-mode = バッファサイズモード
 settings-audio-buffer-frames = バッファサイズ (フレーム)
+settings-audio-buffer-stable-help = Fixed を小さくするとキー音の遅れが減ります。WASAPI 排他では指定値を使い、必要ならデバイス最小までだけ上げます。小さすぎると途切れることがあります。実際の値は上の「native …」で確認できます。
 settings-audio-presets = プリセット:
 settings-audio-exclusive-unimplemented = 排他モード (未実装)
 settings-audio-refresh-devices = デバイス一覧を更新

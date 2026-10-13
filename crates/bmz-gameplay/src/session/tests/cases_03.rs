@@ -252,6 +252,7 @@ fn auto_keysound_plays_note_sounds_without_input() {
     assert_eq!(audio.scheduled[0].start_frame, 0);
     assert_eq!(audio.scheduled[0].volume, 0.0625);
     assert_eq!(audio.scheduled[0].restart_policy, RestartPolicy::StopSameSound);
+    assert!(!audio.scheduled[0].catch_up);
 }
 
 #[test]

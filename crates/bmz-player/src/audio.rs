@@ -53,6 +53,8 @@ pub struct AudioOutputDiagnostics {
     pub command_drain_lock_miss_count: u64,
     pub command_engine_lock_miss_count: u64,
     pub command_queue_max_depth: u64,
+    pub scheduling_late_frames: u64,
+    pub scheduling_max_late_frames: u64,
 }
 
 impl AudioOutputDiagnostics {
@@ -91,6 +93,10 @@ impl AudioOutputDiagnostics {
         self.command_engine_lock_miss_count =
             self.command_engine_lock_miss_count.saturating_add(diagnostics.engine_lock_misses);
         self.command_queue_max_depth = self.command_queue_max_depth.max(diagnostics.max_depth);
+        self.scheduling_late_frames =
+            self.scheduling_late_frames.saturating_add(diagnostics.scheduling_late_frames);
+        self.scheduling_max_late_frames =
+            self.scheduling_max_late_frames.max(diagnostics.scheduling_max_late_frames);
     }
 }
 

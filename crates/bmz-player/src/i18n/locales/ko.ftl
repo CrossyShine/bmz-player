@@ -286,6 +286,7 @@ settings-audio-auto-driver-default = 자동
 settings-audio-sample-rate = 샘플 레이트
 settings-audio-buffer-mode = 버퍼 크기 모드
 settings-audio-buffer-frames = 버퍼 크기 (프레임)
+settings-audio-buffer-stable-help = Fixed를 작게 하면 키음 지연이 줄어듭니다. WASAPI Exclusive는 설정값을 쓰며, 필요할 때만 장치 최소값까지 올립니다. 너무 작으면 끊길 수 있습니다. 실제 값은 위쪽 「native …」 줄에서 확인할 수 있습니다.
 settings-audio-presets = 프리셋:
 settings-audio-exclusive-unimplemented = 단독 모드 (미구현)
 settings-audio-refresh-devices = 장치 목록 새로 고침

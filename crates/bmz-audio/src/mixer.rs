@@ -50,13 +50,23 @@ impl MixerState {
         for sound in sounds {
             match sound.restart_policy {
                 RestartPolicy::StopSameSound => {
+                    // Only stop other StopSameSound voices so LimitSameSound
+                    // schedule-ahead keysounds (when used) are not cut by BGM.
                     stop_same_sound_at(&mut self.voices, sound.sound_id, sound.start_frame);
                 }
                 RestartPolicy::LimitSameSound(max_voices) => {
                     if max_voices == 0 {
                         continue;
                     }
-                    limit_same_sound(&mut self.voices, sound.sound_id, max_voices);
+                    // Never drop unstarted future notes here — schedule-ahead
+                    // batches of rapid same-WAV rolls would lose early attacks.
+                    // Only cull already-audible LimitSameSound voices.
+                    limit_started_same_sound(
+                        &mut self.voices,
+                        sound.sound_id,
+                        max_voices,
+                        sound.start_frame,
+                    );
                 }
                 RestartPolicy::Overlap => {}
             }
@@ -136,6 +146,10 @@ impl MixerState {
         // (旧 `Vec::with_capacity` + voices 差し替え)を排してリアルタイム安全にする。
         let output_sample_rate = self.output_sample_rate;
         let playback_rate = self.playback_rate;
+
+        // Cap same-WAV keysound polyphony when each note becomes audible, not
+        // when schedule-ahead enqueues future attacks.
+        enforce_limit_same_sound_starts(&mut self.voices, output_start_frame, frame_count);
 
         self.voices.retain_mut(|voice| {
             let Some(sample) = sample_bank.get(voice.sound.sound_id) else {
@@ -234,20 +248,154 @@ impl MixerState {
     }
 }
 
-fn limit_same_sound(
-    voices: &mut Vec<ActiveVoice>,
+fn is_limit_same_sound_voice(voice: &ActiveVoice) -> bool {
+    matches!(voice.sound.restart_policy, RestartPolicy::LimitSameSound(_))
+}
+
+fn is_stop_same_sound_voice(voice: &ActiveVoice) -> bool {
+    matches!(voice.sound.restart_policy, RestartPolicy::StopSameSound)
+}
+
+fn limit_voice_still_active_at(voice: &ActiveVoice, at_frame: u64) -> bool {
+    voice.started
+        && is_limit_same_sound_voice(voice)
+        && voice.stop_at_frame.is_none_or(|stop| stop > at_frame)
+}
+
+/// Cull already-audible LimitSameSound voices of `sound_id` so a new one can start.
+/// No heap allocation: the mix callback must stay realtime-safe.
+fn limit_started_same_sound(
+    voices: &mut [ActiveVoice],
     sound_id: bmz_core::ids::SoundId,
     max_voices: usize,
+    at_frame: u64,
 ) {
-    let mut same_sound_count =
-        voices.iter().filter(|voice| voice.sound.sound_id == sound_id).count();
-    while same_sound_count >= max_voices {
-        let Some(index) = voices.iter().position(|voice| voice.sound.sound_id == sound_id) else {
+    if max_voices == 0 {
+        return;
+    }
+    loop {
+        let mut active_count = 0usize;
+        let mut oldest: Option<usize> = None;
+        for (index, voice) in voices.iter().enumerate() {
+            if voice.sound.sound_id == sound_id && limit_voice_still_active_at(voice, at_frame) {
+                active_count += 1;
+                // voices are oldest-first; the first match is the oldest competitor.
+                if oldest.is_none() {
+                    oldest = Some(index);
+                }
+            }
+        }
+        // Room for the incoming voice: keep at most max_voices - 1 currently active.
+        if active_count < max_voices {
+            break;
+        }
+        let Some(victim) = oldest else {
             break;
         };
-        // voice は古い順に追加されるため、最新の音を残して最古のものを落とす。
-        voices.swap_remove(index);
-        same_sound_count -= 1;
+        voices[victim].stop_at_frame =
+            Some(voices[victim].stop_at_frame.map_or(at_frame, |existing| existing.min(at_frame)));
+    }
+}
+
+fn limit_competitor_at(
+    voice: &ActiveVoice,
+    sound_id: bmz_core::ids::SoundId,
+    at_frame: u64,
+    self_index: usize,
+    other_index: usize,
+) -> bool {
+    if other_index == self_index
+        || voice.sound.sound_id != sound_id
+        || !is_limit_same_sound_voice(voice)
+        || voice.stop_at_frame.is_some_and(|stop| stop <= at_frame)
+    {
+        return false;
+    }
+    if voice.started {
+        return true;
+    }
+    // Unstarted voices that begin before this attack will already be audible.
+    if voice.sound.start_frame < at_frame {
+        return true;
+    }
+    // Same-frame chord: lower index was pushed first / ordered earlier.
+    voice.sound.start_frame == at_frame && other_index < self_index
+}
+
+fn is_starting_limit_voice(voice: &ActiveVoice, buffer_end: u64) -> bool {
+    !voice.started
+        && is_limit_same_sound_voice(voice)
+        && voice.sound.start_frame < buffer_end
+        && voice.stop_at_frame.is_none_or(|stop| stop > voice.sound.start_frame)
+}
+
+/// Apply LimitSameSound caps when each voice becomes audible in this buffer.
+/// Walks starting voices in (start_frame, index) order without allocating.
+fn enforce_limit_same_sound_starts(
+    voices: &mut [ActiveVoice],
+    output_start_frame: u64,
+    frame_count: usize,
+) {
+    let buffer_end = output_start_frame.saturating_add(frame_count as u64);
+    let mut prev: Option<(u64, usize)> = None;
+    loop {
+        let mut next: Option<(u64, usize)> = None;
+        for (index, voice) in voices.iter().enumerate() {
+            if !is_starting_limit_voice(voice, buffer_end) {
+                continue;
+            }
+            let start_frame = voice.sound.start_frame;
+            if let Some((prev_frame, prev_index)) = prev
+                && (start_frame < prev_frame || (start_frame == prev_frame && index <= prev_index))
+            {
+                continue;
+            }
+            if next.is_none_or(|(best_frame, best_index)| {
+                (start_frame, index) < (best_frame, best_index)
+            }) {
+                next = Some((start_frame, index));
+            }
+        }
+        let Some((start_frame, index)) = next else {
+            break;
+        };
+        prev = Some((start_frame, index));
+
+        let RestartPolicy::LimitSameSound(max_voices) = voices[index].sound.restart_policy else {
+            continue;
+        };
+        if max_voices == 0 {
+            voices[index].stop_at_frame = Some(
+                voices[index]
+                    .stop_at_frame
+                    .map_or(start_frame, |existing| existing.min(start_frame)),
+            );
+            continue;
+        }
+        let sound_id = voices[index].sound.sound_id;
+        loop {
+            let mut active_count = 0usize;
+            let mut oldest: Option<usize> = None;
+            for (other_index, voice) in voices.iter().enumerate() {
+                if limit_competitor_at(voice, sound_id, start_frame, index, other_index) {
+                    active_count += 1;
+                    if oldest.is_none() {
+                        oldest = Some(other_index);
+                    }
+                }
+            }
+            if active_count < max_voices {
+                break;
+            }
+            let Some(victim) = oldest else {
+                break;
+            };
+            voices[victim].stop_at_frame = Some(
+                voices[victim]
+                    .stop_at_frame
+                    .map_or(start_frame, |existing| existing.min(start_frame)),
+            );
+        }
     }
 }
 
@@ -257,7 +405,7 @@ fn stop_same_sound_at(
     stop_frame: u64,
 ) {
     for voice in voices {
-        if voice.sound.sound_id == sound_id {
+        if voice.sound.sound_id == sound_id && is_stop_same_sound_voice(voice) {
             voice.stop_at_frame =
                 Some(voice.stop_at_frame.map_or(stop_frame, |existing| existing.min(stop_frame)));
         }
@@ -642,12 +790,62 @@ mod tests {
             (0..5).map(|_| scheduled_sound(0, 1, 1.0, RestartPolicy::LimitSameSound(3))),
         );
 
-        assert_eq!(mixer.voices.len(), 3);
+        // Schedule-ahead keeps all future notes; the limit applies when they start.
+        assert_eq!(mixer.voices.len(), 5);
 
         let mut output = vec![0.0; 2];
         mixer.mix_stereo(&bank, 0, &mut output);
 
         assert_eq!(output, vec![3.0, 3.0]);
+    }
+
+    #[test]
+    fn limit_same_sound_keeps_spaced_future_attacks_from_schedule_ahead_batch() {
+        let mut bank = SampleBank::default();
+        bank.insert(
+            SoundId(1),
+            DecodedSample { channels: 1, sample_rate: 48_000, frames: vec![1.0; 4] },
+        );
+        let mut mixer = MixerState::default();
+        // Rapid same-WAV roll: four hits in one ScheduleAll, spaced apart.
+        mixer.push_scheduled([
+            scheduled_sound(0, 1, 1.0, RestartPolicy::LimitSameSound(2)),
+            scheduled_sound(10, 1, 1.0, RestartPolicy::LimitSameSound(2)),
+            scheduled_sound(20, 1, 1.0, RestartPolicy::LimitSameSound(2)),
+            scheduled_sound(30, 1, 1.0, RestartPolicy::LimitSameSound(2)),
+        ]);
+        assert_eq!(mixer.voices.len(), 4);
+
+        let mut first = vec![0.0; 2];
+        mixer.mix_stereo(&bank, 0, &mut first);
+        assert_eq!(first, vec![1.0, 1.0]);
+
+        let mut second = vec![0.0; 2];
+        mixer.mix_stereo(&bank, 10, &mut second);
+        assert_eq!(second, vec![1.0, 1.0]);
+    }
+
+    #[test]
+    fn stop_same_sound_bgm_does_not_cut_limit_same_sound_keysound() {
+        let mut bank = SampleBank::default();
+        bank.insert(
+            SoundId(1),
+            DecodedSample { channels: 1, sample_rate: 48_000, frames: vec![1.0; 8] },
+        );
+        let mut mixer = MixerState::default();
+        mixer.push_scheduled([
+            scheduled_sound(0, 1, 1.0, RestartPolicy::LimitSameSound(2)),
+            scheduled_sound(2, 1, 1.0, RestartPolicy::StopSameSound),
+        ]);
+
+        let mut early = vec![0.0; 8];
+        mixer.mix_stereo(&bank, 0, &mut early);
+        // Key attack at 0 must still be audible after BGM StopSameSound at 2.
+        assert_eq!(early[0], 1.0);
+        assert_eq!(early[2], 1.0);
+        // From frame 2 both key (still running) and BGM play.
+        assert_eq!(early[4], 2.0);
+        assert_eq!(early[6], 2.0);
     }
 
     #[test]

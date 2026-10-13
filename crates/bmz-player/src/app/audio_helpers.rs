@@ -100,6 +100,7 @@ pub(super) enum AudioOutputIssueCause {
     GeneratedPreviewCpuPressure,
     CallbackDeadlineExceeded,
     MixClipping,
+    LateSchedule,
     Unknown,
 }
 
@@ -112,6 +113,7 @@ impl AudioOutputIssueCause {
             Self::GeneratedPreviewCpuPressure => "generated_preview_cpu_pressure",
             Self::CallbackDeadlineExceeded => "callback_deadline_exceeded",
             Self::MixClipping => "mix_clipping",
+            Self::LateSchedule => "late_schedule",
             Self::Unknown => "unknown",
         }
     }
@@ -127,6 +129,7 @@ pub(super) struct AudioOutputIssueMetrics {
     pub(super) callback_over_budget: bool,
     pub(super) clipped_samples: u64,
     pub(super) generated_preview_loading: bool,
+    pub(super) late_schedule: bool,
 }
 
 pub(super) fn classify_audio_output_issue(
@@ -142,6 +145,8 @@ pub(super) fn classify_audio_output_issue(
         AudioOutputIssueCause::GeneratedPreviewCpuPressure
     } else if metrics.callback_over_budget {
         AudioOutputIssueCause::CallbackDeadlineExceeded
+    } else if metrics.late_schedule {
+        AudioOutputIssueCause::LateSchedule
     } else if metrics.clipped_samples != 0 {
         AudioOutputIssueCause::MixClipping
     } else {
