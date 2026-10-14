@@ -146,6 +146,8 @@ impl WinitApp {
             snapshot.command_coalesced_count.saturating_sub(previous.command_coalesced_count);
         let scheduling_late_frames =
             snapshot.scheduling_late_frames.saturating_sub(previous.scheduling_late_frames);
+        // `take_command_diagnostics` resets the max each collect, so this value is
+        // the peak late distance inside the current reporting interval only.
         let scheduling_max_late_frames = snapshot.scheduling_max_late_frames;
 
         let sample_rate =
@@ -155,10 +157,11 @@ impl WinitApp {
             ((avg_callback_frames / f64::from(sample_rate)) * 1_000_000_000.0).round() as u64;
         let callback_over_budget =
             callback_budget_ns > 0 && snapshot.max_callback_ns > callback_budget_ns;
-        // ~2 ms at 48 kHz: below this, late starts are usually inaudible as "loss"
-        // but still useful when hunting remaining keysound gaps without other WARNs.
-        let late_schedule =
-            scheduling_late_frames != 0 && scheduling_max_late_frames >= sample_rate as u64 / 500;
+        let late_schedule = late_schedule_from_interval(
+            scheduling_late_frames,
+            scheduling_max_late_frames,
+            sample_rate,
+        );
         let suspected_cause = classify_audio_output_issue(AudioOutputIssueMetrics {
             stream_errors,
             source_lock_misses,
@@ -235,13 +238,13 @@ impl WinitApp {
             .map(AudioRuntime::take_diagnostics)
             .unwrap_or_default();
         if let Some(system_audio) = &self.audio.system_audio {
-            snapshot.add_command_queue(system_audio.command_diagnostics());
+            snapshot.add_command_queue(system_audio.take_command_diagnostics());
         }
         if let Some(active_play) = &self.play.active_play {
-            snapshot.add_command_queue(active_play.running.audio.command_diagnostics());
+            snapshot.add_command_queue(active_play.running.audio.take_command_diagnostics());
         }
         if let Some(draining_audio) = &self.audio.draining_audio {
-            snapshot.add_command_queue(draining_audio.command_diagnostics());
+            snapshot.add_command_queue(draining_audio.take_command_diagnostics());
         }
         snapshot
     }

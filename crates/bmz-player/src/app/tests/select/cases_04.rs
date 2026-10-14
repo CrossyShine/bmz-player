@@ -184,6 +184,34 @@ fn audio_diagnostic_marks_generated_preview_callback_pressure() {
 }
 
 #[test]
+fn late_schedule_classification_uses_per_interval_maximum() {
+    // ~2 ms threshold at 48 kHz is 96 frames.
+    assert!(late_schedule_from_interval(100, 96, 48_000));
+    assert!(!late_schedule_from_interval(100, 95, 48_000));
+    assert!(!late_schedule_from_interval(0, 96, 48_000));
+
+    // A prior interval's large spike must not keep later tiny delays as late_schedule.
+    let first_interval = late_schedule_from_interval(1_000, 480, 48_000);
+    let second_interval = late_schedule_from_interval(3, 10, 48_000);
+    assert!(first_interval);
+    assert!(!second_interval);
+    assert_eq!(
+        classify_audio_output_issue(AudioOutputIssueMetrics {
+            late_schedule: second_interval,
+            ..Default::default()
+        }),
+        AudioOutputIssueCause::Unknown
+    );
+    assert_eq!(
+        classify_audio_output_issue(AudioOutputIssueMetrics {
+            late_schedule: first_interval,
+            ..Default::default()
+        }),
+        AudioOutputIssueCause::LateSchedule
+    );
+}
+
+#[test]
 fn select_distributions_load_in_background_and_reuse_cached_results() {
     let path = std::env::temp_dir().join(format!(
         "bmz-distribution-{}-{}.db",

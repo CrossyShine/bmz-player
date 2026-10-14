@@ -170,6 +170,14 @@ impl AppAudioOutput {
         self.engine.diagnostics()
     }
 
+    /// Command-queue diagnostics with a per-interval scheduling-late maximum.
+    pub fn take_command_diagnostics(&self) -> AudioCommandQueueDiagnostics {
+        let scheduling_max_late_frames = self.engine.take_scheduling_max_late_frames();
+        let mut diagnostics = self.engine.diagnostics();
+        diagnostics.scheduling_max_late_frames = scheduling_max_late_frames;
+        diagnostics
+    }
+
     pub fn clock(&self) -> AudioClock {
         self.source.clock()
     }
@@ -414,6 +422,14 @@ pub struct SystemAudio {
 impl SystemAudio {
     pub fn command_diagnostics(&self) -> AudioCommandQueueDiagnostics {
         self.engine.diagnostics()
+    }
+
+    /// Command-queue diagnostics with a per-interval scheduling-late maximum.
+    pub fn take_command_diagnostics(&self) -> AudioCommandQueueDiagnostics {
+        let scheduling_max_late_frames = self.engine.take_scheduling_max_late_frames();
+        let mut diagnostics = self.engine.diagnostics();
+        diagnostics.scheduling_max_late_frames = scheduling_max_late_frames;
+        diagnostics
     }
 
     /// クロックを開始してストリームを走らせ、`play_now` / `stop_sound` を即座に

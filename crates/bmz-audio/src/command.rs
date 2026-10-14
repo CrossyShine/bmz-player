@@ -317,6 +317,15 @@ impl AudioEngineHandle {
         self.inner.diagnostics()
     }
 
+    /// Read and reset the max late-schedule distance since the previous take.
+    ///
+    /// Cumulative counters such as [`AudioCommandQueueDiagnostics::scheduling_late_frames`]
+    /// stay intact; only the interval maximum is swapped out so reporters can classify
+    /// each reporting window independently.
+    pub fn take_scheduling_max_late_frames(&self) -> u64 {
+        self.inner.counters.scheduling_max_late_frames.swap(0, Ordering::Relaxed)
+    }
+
     pub fn set_output_sample_rate(&self, rate: u32) {
         let Ok(mut engine) = self.engine.lock() else {
             return;
