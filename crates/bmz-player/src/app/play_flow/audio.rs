@@ -146,8 +146,9 @@ impl WinitApp {
             snapshot.command_coalesced_count.saturating_sub(previous.command_coalesced_count);
         let scheduling_late_frames =
             snapshot.scheduling_late_frames.saturating_sub(previous.scheduling_late_frames);
-        // `take_command_diagnostics` resets the max each collect, so this value is
-        // the peak late distance inside the current reporting interval only.
+        // `collect_audio_diagnostics` takes each source's interval peak (including
+        // play sources dropped since the last collect), so this value covers only
+        // the current reporting interval.
         let scheduling_max_late_frames = snapshot.scheduling_max_late_frames;
 
         let sample_rate =
@@ -157,11 +158,7 @@ impl WinitApp {
             ((avg_callback_frames / f64::from(sample_rate)) * 1_000_000_000.0).round() as u64;
         let callback_over_budget =
             callback_budget_ns > 0 && snapshot.max_callback_ns > callback_budget_ns;
-        let late_schedule = late_schedule_from_interval(
-            scheduling_late_frames,
-            scheduling_max_late_frames,
-            sample_rate,
-        );
+        let late_schedule = late_schedule_from_interval(scheduling_max_late_frames, sample_rate);
         let suspected_cause = classify_audio_output_issue(AudioOutputIssueMetrics {
             stream_errors,
             source_lock_misses,

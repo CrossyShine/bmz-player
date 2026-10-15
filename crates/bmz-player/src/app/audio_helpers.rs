@@ -156,16 +156,14 @@ pub(super) fn classify_audio_output_issue(
 
 /// Suspect late schedule from one reporting interval only.
 ///
-/// Threshold is ~2 ms (`sample_rate / 500`). The maximum must be the peak late
-/// distance inside that interval, not a lifetime cumulative max — otherwise a
-/// single old spike keeps classifying later tiny delays as `late_schedule`.
-pub(super) fn late_schedule_from_interval(
-    scheduling_late_frames: u64,
-    scheduling_max_late_frames: u64,
-    sample_rate: u32,
-) -> bool {
-    let sample_rate = u64::from(sample_rate.max(1));
-    scheduling_late_frames != 0 && scheduling_max_late_frames >= sample_rate / 500
+/// Threshold is ~2 ms (`sample_rate / 500`, at least one frame). The maximum must
+/// be the peak late distance inside that interval across all sources, not a
+/// lifetime max — otherwise a single old spike keeps classifying later tiny delays
+/// as `late_schedule`. The cumulative late-frame delta is not required: it can
+/// shrink to zero when sources are added or removed within the interval.
+pub(super) fn late_schedule_from_interval(interval_max_late_frames: u64, sample_rate: u32) -> bool {
+    let threshold = (u64::from(sample_rate) / 500).max(1);
+    interval_max_late_frames >= threshold
 }
 
 pub(super) fn select_preview_normalization_gain(enabled: bool, analyzed_gain: f32) -> f32 {
